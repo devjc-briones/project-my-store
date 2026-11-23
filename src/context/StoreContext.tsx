@@ -35,6 +35,15 @@ import {
   deriveOrderPaymentStatus,
   derivePaymentMethodKey,
 } from '../utils/supabaseMappers';
+import {
+  syncOrderToSupabase,
+  syncPaymentSettingsToSupabase,
+  syncPlatformChannelsToSupabase,
+  syncProductToSupabase,
+  syncStoreToSupabase,
+  syncSubscriptionToSupabase,
+  syncUserToSupabase,
+} from '../utils/supabaseSync';
 import { AppRoute, buildRoutePath, parseRoute } from '../router/routes';
 
 const STORAGE_KEY = 'mystore_saas_state_v2';
@@ -468,6 +477,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         users: [newUser, ...(prev.users ?? [])],
       }));
 
+      syncUserToSupabase(newUser);
       return { success: true, user: newUser };
     },
     [state.buyers, state.users]
@@ -628,6 +638,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         buyers: [...(prev.buyers ?? []), newBuyer],
         currentBuyer: newBuyer,
       }));
+      syncUserToSupabase(newBuyer);
       return { success: true, buyer: newBuyer };
     },
     [state.buyers, state.users]
@@ -872,6 +883,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         activeStoreId: newStoreId,
       }));
 
+      syncStoreToSupabase(newStore);
+      syncPaymentSettingsToSupabase(createDefaultPaymentSettings(newStoreId));
+
       return { store: newStore };
     },
     [state.currentUser?.id, state.currentUser?.plan, state.currentUser?.role, state.currentUser?.status, state.stores]
@@ -1069,6 +1083,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         products: [product, ...prev.products],
       }));
 
+      syncProductToSupabase(product);
       return product;
     },
     [state.products]
@@ -1119,7 +1134,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
               }))
             : p.variants;
 
-          return {
+          const updated = {
             ...p,
             ...updates,
             name: updates.name !== undefined ? updates.name.trim() || p.name : p.name,
@@ -1136,6 +1151,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             finalPrice: clampNonNegative(smart.finalPrice),
             updatedAt: now,
           };
+          syncProductToSupabase(updated);
+          return updated;
         }),
       }));
     },
@@ -1175,6 +1192,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           ),
           updatedAt: now,
         };
+        syncPaymentSettingsToSupabase(merged);
         return {
           ...prev,
           paymentSettingsByStore: {
@@ -1280,6 +1298,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           placedOrders: [newOrder, ...(prev.placedOrders ?? [])],
         };
       });
+      syncOrderToSupabase(newOrder);
       return newOrder;
     },
     [state.currentBuyer, state.paymentSettingsByStore, state.stores]
