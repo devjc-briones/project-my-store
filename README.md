@@ -1,11 +1,30 @@
-<div align="center">
+# mystore — Multi-Tenant Store Builder
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+Multi-tenant e-commerce store builder SaaS featuring 10 industry storefront templates (5 Free + 5 Pro), live branding customizer, product & variant catalog management, order tracking, and admin billing controls.
 
-  <h1>Built with AI Studio</h2>
+## Tech Stack
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+- **Frontend:** React 19, TypeScript, Vite, Tailwind CSS v4, Motion, Lucide React
+- **Database Blueprint (Optional Supabase Wiring):** PostgreSQL + Supabase Auth + Storage (`supabase/schema.sql`)
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+## Local Development
 
-</div>
+```bash
+npm install
+npm run dev
+```
+
+Build and type-check:
+
+```bash
+npm run lint
+npm run build
+```
+
+## Deploying to Vercel via GitHub
+
+1. Push this repository to GitHub (`.gitignore` excludes `node_modules/`, `dist/`, `.env*`, and local AI Studio scratch attachments).
+2. In Vercel, click **Add New Project** and import your GitHub repository.
+3. Keep the detected **Vite** preset (`Build Command: npm run build`, `Output Directory: dist`). `vercel.json` handles clean SPA routing for `/dashboard`, `/admin`, `/login`, `/shop/:slug`, and `/:slug`.
+4. Add environment variables in **Project Settings -> Environment Variables** when connecting Supabase (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`).
+5. Click **Deploy**.

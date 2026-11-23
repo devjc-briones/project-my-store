@@ -1,0 +1,6 @@
+{
+  "name": "mystore",
+  "description": "Multi-tenant e-commerce store builder SaaS with 5 industry templates, live branding customization, product catalog management, and instant subpath storefronts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

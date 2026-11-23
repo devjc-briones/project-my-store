@@ -1,0 +1,1755 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AlertCircle,
+  ArrowLeft,
+  Banknote,
+  Check,
+  CheckCircle2,
+  Copy,
+  Landmark,
+  Minus,
+  PackageSearch,
+  Plus,
+  QrCode,
+  ShoppingBag,
+  SlidersHorizontal,
+  Smartphone,
+  Sparkles,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react';
+import { TEMPLATE_SHOWCASE_MEDIA } from '../../data/templateVisuals';
+import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
+import { resolveThemeTokens } from '../../templates/templateTypes';
+import {
+  BuyerAccount,
+  BuyerCheckoutInfo,
+  CustomerOrder,
+  PaymentSettings,
+  Store,
+} from '../../types/schema';
+import { readImageFileAsDataUrl } from '../../utils/paymentQr';
+import { formatCurrency } from '../../utils/pricing';
+import { useStore } from '../../context/StoreContext';
+import { BuyerAuthModal } from './BuyerAuthModal';
+
+export interface CartLineItem {
+  key: string;
+  productId: string;
+  name: string;
+  variant?: string;
+  imageUrl?: string;
+  unitPrice: number;
+  quantity: number;
+}
+
+type PaymentMethodKey = 'gcash' | 'maya' | 'bank' | 'cod';
+
+interface EnabledPaymentOption {
+  key: PaymentMethodKey;
+  label: string;
+  subtitle: string;
+  icon: typeof Smartphone;
+}
+
+interface StorefrontCartDrawerProps {
+  isOpen: boolean;
+  store: Store;
+  items: CartLineItem[];
+  paymentSettings: PaymentSettings;
+  onClose: () => void;
+  onUpdateQuantity: (key: string, delta: number) => void;
+  onRemoveItem: (key: string) => void;
+  onClearCart: () => void;
+  onPlaceOrder: (
+    orderInput: Omit<CustomerOrder, 'id' | 'status' | 'createdAt'>
+  ) => CustomerOrder;
+  onTrackOrder?: (orderId: string) => void;
+  onOpenInfoSettings?: () => void;
+}
+
+interface CheckoutFieldErrors {
+  customerName?: string;
+  phoneNumber?: string;
+  deliveryAddress?: string;
+}
+
+const NON_KEYBOARD_INPUT_TYPES = new Set([
+  'button',
+  'checkbox',
+  'radio',
+  'submit',
+  'reset',
+  'file',
+  'range',
+  'color',
+  'hidden',
+]);
+
+function isEditableElement(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+    return true;
+  }
+  if (target instanceof HTMLInputElement) {
+    return !NON_KEYBOARD_INPUT_TYPES.has(target.type);
+  }
+  return target.isContentEditable;
+}
+
+export function StorefrontCartDrawer({
+  isOpen,
+  store,
+  items,
+  paymentSettings,
+  onClose,
+  onUpdateQuantity,
+  onRemoveItem,
+  onClearCart,
+  onPlaceOrder,
+  onTrackOrder,
+  onOpenInfoSettings,
+}: StorefrontCartDrawerProps) {
+  useBodyScrollLock(isOpen);
+  const { state, pushToast, getBuyerCheckoutInfo, saveBuyerCheckoutInfo } = useStore();
+
+  const theme = resolveThemeTokens(store.branding, store.templateId);
+  const fallbackImg = TEMPLATE_SHOWCASE_MEDIA[store.templateId].imageUrl;
+  const currency = paymentSettings.currency;
+
+  const savedBuyerInfo = state.currentBuyer ? getBuyerCheckoutInfo() : null;
+  const hasSavedBuyerInfo = Boolean(
+    state.currentBuyer &&
+      savedBuyerInfo &&
+      (savedBuyerInfo.fullName.trim() ||
+        savedBuyerInfo.phoneNumber.trim() ||
+        savedBuyerInfo.deliveryAddress.trim())
+  );
+
+  const [step, setStep] = useState<'cart' | 'checkout' | 'receipt'>('cart');
+  const [customerName, setCustomerName] = useState(
+    savedBuyerInfo?.fullName || state.currentBuyer?.name || ''
+  );
+  const [phoneNumber, setPhoneNumber] = useState(savedBuyerInfo?.phoneNumber ?? '');
+  const [showBuyerAuth, setShowBuyerAuth] = useState(false);
+  const [deliveryAddress, setDeliveryAddress] = useState(
+    savedBuyerInfo?.deliveryAddress ?? ''
+  );
+  const [notes, setNotes] = useState(savedBuyerInfo?.notes ?? '');
+  const [saveInfoForLater, setSaveInfoForLater] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<CheckoutFieldErrors>({});
+  const [shakeForm, setShakeForm] = useState(false);
+  const [receiptOrder, setReceiptOrder] = useState<CustomerOrder | null>(null);
+  const [copiedOrderId, setCopiedOrderId] = useState(false);
+
+  // Mobile keyboard / input focus tracking so Place Order footer doesn't cover checkout inputs
+  const [isInputFocused, setIsInputFocused] = useState(false);
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+  const blurTimerRef = useRef<number | null>(null);
+  const maxViewportHeightRef = useRef<number>(
+    typeof window !== 'undefined' ? window.visualViewport?.height ?? window.innerHeight : 0
+  );
+
+  // Online QR payment modal & proof-of-payment state
+  const [paymentQrModalOpen, setPaymentQrModalOpen] = useState(false);
+  const [paymentProofUrl, setPaymentProofUrl] = useState<string>('');
+  const [paymentProofError, setPaymentProofError] = useState<string | null>(null);
+  const [shakeProofUpload, setShakeProofUpload] = useState(false);
+  const [copiedAccountNumber, setCopiedAccountNumber] = useState(false);
+
+  const fullNameRef = useRef<HTMLInputElement | null>(null);
+  const phoneRef = useRef<HTMLInputElement | null>(null);
+  const addressRef = useRef<HTMLTextAreaElement | null>(null);
+  const proofFileInputRef = useRef<HTMLInputElement | null>(null);
+  const proofBoxRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isOpen || typeof window === 'undefined' || !window.visualViewport) return;
+    const vv = window.visualViewport;
+    maxViewportHeightRef.current = vv.height;
+    let wasKeyboardOpen = false;
+
+    const handleResize = () => {
+      const currentHeight = vv.height;
+      if (currentHeight > maxViewportHeightRef.current) {
+        maxViewportHeightRef.current = currentHeight;
+      }
+      const shrunk = maxViewportHeightRef.current - currentHeight > 130;
+      if (shrunk) {
+        wasKeyboardOpen = true;
+        setIsKeyboardOpen(true);
+      } else if (wasKeyboardOpen) {
+        wasKeyboardOpen = false;
+        setIsKeyboardOpen(false);
+        setIsInputFocused(false);
+      }
+    };
+
+    const handleOrientation = () => {
+      maxViewportHeightRef.current = vv.height;
+      setIsKeyboardOpen(false);
+    };
+
+    vv.addEventListener('resize', handleResize);
+    window.addEventListener('orientationchange', handleOrientation);
+    return () => {
+      vv.removeEventListener('resize', handleResize);
+      window.removeEventListener('orientationchange', handleOrientation);
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    return () => {
+      if (blurTimerRef.current !== null) {
+        window.clearTimeout(blurTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleFormFocusCapture = (e: React.FocusEvent<HTMLFormElement>) => {
+    if (!isEditableElement(e.target)) return;
+    if (blurTimerRef.current !== null) {
+      window.clearTimeout(blurTimerRef.current);
+      blurTimerRef.current = null;
+    }
+    setIsInputFocused(true);
+  };
+
+  const handleFormBlurCapture = (e: React.FocusEvent<HTMLFormElement>) => {
+    if (!isEditableElement(e.target)) return;
+    if (blurTimerRef.current !== null) {
+      window.clearTimeout(blurTimerRef.current);
+    }
+    blurTimerRef.current = window.setTimeout(() => {
+      const active = document.activeElement;
+      if (!isEditableElement(active) || !e.currentTarget.contains(active)) {
+        setIsInputFocused(false);
+      }
+    }, 120);
+  };
+
+  const enabledPaymentMethods = useMemo<EnabledPaymentOption[]>(() => {
+    const list: EnabledPaymentOption[] = [];
+    if (paymentSettings.gcashEnabled) {
+      list.push({
+        key: 'gcash',
+        label: 'GCash',
+        subtitle: 'Mobile wallet transfer',
+        icon: Smartphone,
+      });
+    }
+    if (paymentSettings.mayaEnabled) {
+      list.push({
+        key: 'maya',
+        label: 'Maya',
+        subtitle: 'QR / wallet transfer',
+        icon: Smartphone,
+      });
+    }
+    if (paymentSettings.bankTransferEnabled) {
+      list.push({
+        key: 'bank',
+        label: 'Bank Transfer',
+        subtitle: paymentSettings.bankDetails.bankName || 'InstaPay / PESONet',
+        icon: Landmark,
+      });
+    }
+    if (paymentSettings.codEnabled) {
+      list.push({
+        key: 'cod',
+        label: 'Cash on Delivery (COD)',
+        subtitle: 'Pay courier upon arrival',
+        icon: Banknote,
+      });
+    }
+    return list;
+  }, [paymentSettings]);
+
+  const [selectedPaymentKey, setSelectedPaymentKey] = useState<PaymentMethodKey | null>(
+    enabledPaymentMethods[0]?.key ?? null
+  );
+
+  useEffect(() => {
+    if (enabledPaymentMethods.length === 0) {
+      if (selectedPaymentKey !== null) {
+        setSelectedPaymentKey(null);
+      }
+      return;
+    }
+    if (!selectedPaymentKey || !enabledPaymentMethods.some((m) => m.key === selectedPaymentKey)) {
+      setSelectedPaymentKey(enabledPaymentMethods[0].key);
+    }
+  }, [enabledPaymentMethods, selectedPaymentKey]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (paymentQrModalOpen) {
+          setPaymentQrModalOpen(false);
+          return;
+        }
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen, onClose, paymentQrModalOpen]);
+
+  useEffect(() => {
+    setPaymentProofUrl('');
+    setPaymentProofError(null);
+    setShakeProofUpload(false);
+    setCopiedAccountNumber(false);
+  }, [selectedPaymentKey]);
+
+  useEffect(() => {
+    if (isOpen && step === 'receipt' && items.length > 0) {
+      setStep('cart');
+      setReceiptOrder(null);
+    }
+  }, [isOpen, items.length, step]);
+
+  const applySavedCheckoutInfo = (
+    infoOverride?: BuyerCheckoutInfo | null,
+    fallbackName?: string
+  ) => {
+    const info = infoOverride !== undefined ? infoOverride : getBuyerCheckoutInfo();
+    setCustomerName(info?.fullName || fallbackName || state.currentBuyer?.name || '');
+    setPhoneNumber(info?.phoneNumber ?? '');
+    setDeliveryAddress(info?.deliveryAddress ?? '');
+    setNotes(info?.notes ?? '');
+    if (
+      info?.preferredPaymentMethod &&
+      enabledPaymentMethods.some((m) => m.key === info.preferredPaymentMethod)
+    ) {
+      setSelectedPaymentKey(info.preferredPaymentMethod);
+    }
+  };
+
+  // Auto-sync saved Information Settings whenever drawer opens or saved profile updates
+  useEffect(() => {
+    if (!isOpen) return;
+    if (!savedBuyerInfo) return;
+    setCustomerName(savedBuyerInfo.fullName || state.currentBuyer?.name || '');
+    setPhoneNumber(savedBuyerInfo.phoneNumber || '');
+    setDeliveryAddress(savedBuyerInfo.deliveryAddress || '');
+    setNotes(savedBuyerInfo.notes ?? '');
+    if (
+      savedBuyerInfo.preferredPaymentMethod &&
+      enabledPaymentMethods.some((m) => m.key === savedBuyerInfo.preferredPaymentMethod)
+    ) {
+      setSelectedPaymentKey(savedBuyerInfo.preferredPaymentMethod);
+    }
+  }, [
+    isOpen,
+    savedBuyerInfo?.updatedAt,
+    savedBuyerInfo?.fullName,
+    savedBuyerInfo?.phoneNumber,
+    savedBuyerInfo?.deliveryAddress,
+    savedBuyerInfo?.notes,
+    savedBuyerInfo?.preferredPaymentMethod,
+    state.currentBuyer?.name,
+    enabledPaymentMethods,
+  ]);
+
+  if (!isOpen) return null;
+
+  const subtotal =
+    Math.round(items.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0) * 100) / 100;
+  const freeShippingUnlocked =
+    paymentSettings.freeShippingThreshold > 0 &&
+    subtotal >= paymentSettings.freeShippingThreshold;
+  const amountToFreeShipping =
+    paymentSettings.freeShippingThreshold > 0 && !freeShippingUnlocked
+      ? Math.max(0, paymentSettings.freeShippingThreshold - subtotal)
+      : 0;
+  const deliveryFee = items.length === 0 || freeShippingUnlocked ? 0 : paymentSettings.shippingFee;
+  const taxAmount =
+    Math.round(subtotal * ((paymentSettings.taxPercent || 0) / 100) * 100) / 100;
+  const serviceChargeAmount =
+    Math.round(subtotal * ((paymentSettings.serviceChargePercent || 0) / 100) * 100) / 100;
+  const grandTotal =
+    Math.round((subtotal + deliveryFee + taxAmount + serviceChargeAmount) * 100) / 100;
+
+  const selectedMethod =
+    enabledPaymentMethods.find((m) => m.key === selectedPaymentKey) ??
+    enabledPaymentMethods[0] ??
+    null;
+
+  const triggerShake = () => {
+    setShakeForm(false);
+    window.requestAnimationFrame(() => {
+      setShakeForm(true);
+      window.setTimeout(() => setShakeForm(false), 400);
+    });
+  };
+
+  const triggerProofShake = () => {
+    setShakeProofUpload(false);
+    window.requestAnimationFrame(() => {
+      setShakeProofUpload(true);
+      window.setTimeout(() => setShakeProofUpload(false), 400);
+    });
+  };
+
+  const isOnlineQrPayment =
+    selectedPaymentKey === 'gcash' ||
+    selectedPaymentKey === 'bank' ||
+    selectedPaymentKey === 'maya';
+
+  const qrPaymentDetails =
+    selectedPaymentKey === 'gcash'
+      ? {
+          title: 'GCash Payment',
+          qrUrl: paymentSettings.gcashDetails.qrImageUrl,
+          numberLabel: 'GCash Number',
+          accountNumber:
+            paymentSettings.gcashDetails.mobileNumber || 'Contact store for GCash number',
+          accountName: paymentSettings.gcashDetails.accountName || store.name,
+          extraInfo: paymentSettings.gcashDetails.qrNote,
+        }
+      : selectedPaymentKey === 'bank'
+        ? {
+            title: paymentSettings.bankDetails.bankName
+              ? `${paymentSettings.bankDetails.bankName} Payment`
+              : 'Bank Transfer Payment',
+            qrUrl: paymentSettings.bankDetails.qrImageUrl,
+            numberLabel: 'Bank Account Number',
+            accountNumber:
+              paymentSettings.bankDetails.accountNumber || 'Contact store for account number',
+            accountName: paymentSettings.bankDetails.accountName || store.name,
+            extraInfo: paymentSettings.bankDetails.bankName
+              ? `Bank: ${paymentSettings.bankDetails.bankName}`
+              : undefined,
+          }
+        : {
+            title: 'Maya Payment',
+            qrUrl: paymentSettings.mayaDetails.qrImageUrl,
+            numberLabel: 'Maya Number',
+            accountNumber:
+              paymentSettings.mayaDetails.mobileNumber || 'Contact store for Maya number',
+            accountName: paymentSettings.mayaDetails.accountName || store.name,
+            extraInfo: paymentSettings.mayaDetails.qrNote,
+          };
+
+  const completeOrderPlacement = (proofUrl?: string) => {
+    if (!selectedMethod) return;
+    if (saveInfoForLater) {
+      saveBuyerCheckoutInfo({
+        fullName: customerName.trim(),
+        phoneNumber: phoneNumber.trim(),
+        deliveryAddress: deliveryAddress.trim(),
+        notes: notes.trim() || undefined,
+        preferredPaymentMethod: selectedPaymentKey ?? undefined,
+      });
+      setSaveInfoForLater(false);
+    }
+    const createdOrder = onPlaceOrder({
+      storeId: store.id,
+      customerName: customerName.trim(),
+      phoneNumber: phoneNumber.trim(),
+      deliveryAddress: deliveryAddress.trim(),
+      notes: notes.trim() || undefined,
+      paymentMethod: selectedMethod.label,
+      paymentProofUrl: proofUrl,
+      items: items.map((item) => ({
+        productId: item.productId,
+        name: item.name,
+        variant: item.variant,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+      })),
+      subtotal,
+      deliveryFee,
+      taxAmount,
+      serviceChargeAmount,
+      grandTotal,
+    });
+
+    setPaymentQrModalOpen(false);
+    setPaymentProofUrl('');
+    setPaymentProofError(null);
+    setShakeProofUpload(false);
+    setCopiedAccountNumber(false);
+    setReceiptOrder(createdOrder);
+    setStep('receipt');
+    setFieldErrors({});
+    setShakeForm(false);
+    onClearCart();
+  };
+
+  const handleCheckoutSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedMethod) {
+      pushToast({
+        type: 'error',
+        title: 'No payment method available',
+        description: 'This store has not enabled any payment methods yet.',
+      });
+      return;
+    }
+    const nextErrors: CheckoutFieldErrors = {};
+
+    if (customerName.trim().length < 2) {
+      nextErrors.customerName = 'Please enter your full name.';
+    }
+    if (phoneNumber.trim().length < 7) {
+      nextErrors.phoneNumber = 'Please enter a valid contact phone number.';
+    }
+    if (deliveryAddress.trim().length < 5) {
+      nextErrors.deliveryAddress = 'Please enter your full delivery address.';
+    }
+
+    setFieldErrors(nextErrors);
+    if (Object.keys(nextErrors).length > 0) {
+      triggerShake();
+      const firstInvalidEl = nextErrors.customerName
+        ? fullNameRef.current
+        : nextErrors.phoneNumber
+          ? phoneRef.current
+          : addressRef.current;
+      firstInvalidEl?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+
+    if (isOnlineQrPayment) {
+      setIsInputFocused(false);
+      setIsKeyboardOpen(false);
+      setPaymentProofError(null);
+      setShakeProofUpload(false);
+      setPaymentQrModalOpen(true);
+      return;
+    }
+
+    completeOrderPlacement();
+  };
+
+  const handleProofFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const dataUrl = await readImageFileAsDataUrl(file);
+      setPaymentProofUrl(dataUrl);
+      setPaymentProofError(null);
+      setShakeProofUpload(false);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to upload receipt image.';
+      setPaymentProofError(message);
+      triggerProofShake();
+      pushToast({
+        type: 'error',
+        title: 'Invalid Receipt File',
+        description: message,
+      });
+    }
+  };
+
+  const handleConfirmQrPaymentOrder = () => {
+    if (!paymentProofUrl) {
+      setPaymentProofError('Please upload your payment receipt.');
+      triggerProofShake();
+      proofBoxRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      pushToast({
+        type: 'error',
+        title: 'Payment Receipt Required',
+        description: 'Please upload your payment receipt.',
+      });
+      return;
+    }
+
+    completeOrderPlacement(paymentProofUrl);
+  };
+
+  const handleCopyAccountNumber = async (accountNum: string) => {
+    try {
+      await navigator.clipboard.writeText(accountNum);
+      setCopiedAccountNumber(true);
+      window.setTimeout(() => setCopiedAccountNumber(false), 1800);
+    } catch {
+      // Ignore if clipboard API is restricted
+    }
+  };
+
+  const handleCloseDrawer = () => {
+    if (step === 'receipt') {
+      setStep('cart');
+      setReceiptOrder(null);
+      setCopiedOrderId(false);
+    }
+    setIsInputFocused(false);
+    setIsKeyboardOpen(false);
+    setPaymentQrModalOpen(false);
+    setPaymentProofUrl('');
+    setPaymentProofError(null);
+    setShakeProofUpload(false);
+    setCopiedAccountNumber(false);
+    setFieldErrors({});
+    setShakeForm(false);
+    onClose();
+  };
+
+  const handleCopyReceiptOrderId = async (orderId: string) => {
+    try {
+      await navigator.clipboard.writeText(orderId);
+      setCopiedOrderId(true);
+      window.setTimeout(() => setCopiedOrderId(false), 1800);
+    } catch {
+      // Ignore if clipboard API is restricted
+    }
+  };
+
+  const handleTrackThisOrder = (orderId: string) => {
+    setStep('cart');
+    setReceiptOrder(null);
+    setCopiedOrderId(false);
+    setPaymentQrModalOpen(false);
+    setPaymentProofUrl('');
+    setPaymentProofError(null);
+    setFieldErrors({});
+    setShakeForm(false);
+    onClose();
+    onTrackOrder?.(orderId);
+  };
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Shopping Cart and Checkout"
+      className="fixed inset-0 z-50 flex justify-end bg-slate-900/60"
+    >
+      <div className="fixed inset-0" onClick={handleCloseDrawer} aria-hidden="true" />
+
+      <aside
+        className="relative z-10 w-full max-w-md h-full flex flex-col border-l shadow-2xl"
+        style={{
+          backgroundColor: theme.cardBg,
+          borderColor: theme.borderColor,
+          color: theme.textPrimary,
+          fontFamily: theme.bodyFontFamily,
+        }}
+      >
+        {/* Drawer Header */}
+        <div
+          className="px-5 py-4 border-b flex items-center justify-between gap-3 shrink-0"
+          style={{ borderColor: theme.borderColor }}
+        >
+          <div className="flex items-center gap-2.5">
+            {step === 'checkout' && (
+              <button
+                type="button"
+                aria-label="Back to cart"
+                onClick={() => {
+                  setStep('cart');
+                  setIsInputFocused(false);
+                  setIsKeyboardOpen(false);
+                  setFieldErrors({});
+                  setShakeForm(false);
+                }}
+                className="w-8 h-8 rounded-lg flex items-center justify-center border cursor-pointer"
+                style={{ borderColor: theme.borderColor }}
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+            )}
+            <h2
+              className="text-lg font-bold"
+              style={{ fontFamily: theme.headingFontFamily }}
+            >
+              {step === 'cart'
+                ? `Your Bag (${items.reduce((sum, i) => sum + i.quantity, 0)})`
+                : step === 'checkout'
+                  ? 'Checkout Details'
+                  : 'Order Confirmed'}
+            </h2>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleCloseDrawer}
+            aria-label="Close cart"
+            className="w-9 h-9 rounded-xl border flex items-center justify-center cursor-pointer"
+            style={{ borderColor: theme.borderColor, color: theme.textPrimary }}
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto flex flex-col">
+          <div className="p-5 space-y-5 flex-1">
+          {step === 'receipt' && receiptOrder ? (
+            <div className="space-y-5">
+              <div
+                className="p-5 rounded-2xl border text-center space-y-2"
+                style={{ backgroundColor: theme.subtleBg, borderColor: theme.borderColor }}
+              >
+                <CheckCircle2
+                  className="w-10 h-10 mx-auto"
+                  style={{ color: theme.primaryColor }}
+                />
+                <p className="text-xs font-mono font-semibold" style={{ color: theme.primaryColor }}>
+                  Order #{receiptOrder.id}
+                </p>
+                <h3
+                  className="text-xl font-bold"
+                  style={{ fontFamily: theme.headingFontFamily }}
+                >
+                  Thank you, {receiptOrder.customerName}!
+                </h3>
+                <p className="text-xs" style={{ color: theme.textMuted }}>
+                  Your order with {store.name} has been recorded.
+                </p>
+              </div>
+
+              <div
+                className="p-4 rounded-xl border space-y-3 text-xs"
+                style={{ borderColor: theme.borderColor }}
+              >
+                <div className="space-y-1">
+                  <p className="font-semibold">Delivery Details</p>
+                  <p style={{ color: theme.textMuted }}>
+                    {receiptOrder.customerName} · {receiptOrder.phoneNumber}
+                  </p>
+                  <p style={{ color: theme.textMuted }}>{receiptOrder.deliveryAddress}</p>
+                  {receiptOrder.notes && (
+                    <p style={{ color: theme.textMuted }}>Note: {receiptOrder.notes}</p>
+                  )}
+                </div>
+
+                <div className="pt-2 border-t space-y-2" style={{ borderColor: theme.borderColor }}>
+                  <p className="font-semibold">Payment Method</p>
+                  <p style={{ color: theme.textMuted }}>{receiptOrder.paymentMethod}</p>
+                  {receiptOrder.paymentProofUrl && (
+                    <div className="flex items-center gap-2.5 pt-1">
+                      <img
+                        src={receiptOrder.paymentProofUrl}
+                        alt="Uploaded payment receipt"
+                        className="w-12 h-12 rounded-lg object-cover border"
+                        style={{ borderColor: theme.borderColor }}
+                      />
+                      <span className="text-[11px] font-medium" style={{ color: theme.textMuted }}>
+                        Payment receipt attached
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-2 border-t space-y-2" style={{ borderColor: theme.borderColor }}>
+                  <p className="font-semibold">Items Summary</p>
+                  {receiptOrder.items.map((item, idx) => (
+                    <div
+                      key={`${item.productId}_${idx}`}
+                      className="flex items-start justify-between gap-2"
+                    >
+                      <span style={{ color: theme.textMuted }}>
+                        {item.quantity}× {item.name}
+                        {item.variant ? ` (${item.variant})` : ''}
+                      </span>
+                      <span className="font-mono tabular-nums font-semibold shrink-0">
+                        {formatCurrency(item.unitPrice * item.quantity, currency)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                <div
+                  className="pt-2 border-t space-y-1.5"
+                  style={{ borderColor: theme.borderColor }}
+                >
+                  <div className="flex justify-between" style={{ color: theme.textMuted }}>
+                    <span>Subtotal</span>
+                    <span className="font-mono tabular-nums">
+                      {formatCurrency(receiptOrder.subtotal, currency)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between" style={{ color: theme.textMuted }}>
+                    <span>Delivery Fee</span>
+                    <span className="font-mono tabular-nums">
+                      {receiptOrder.deliveryFee === 0
+                        ? 'Free'
+                        : formatCurrency(receiptOrder.deliveryFee, currency)}
+                    </span>
+                  </div>
+                  {receiptOrder.taxAmount > 0 && (
+                    <div className="flex justify-between" style={{ color: theme.textMuted }}>
+                      <span>Tax / VAT</span>
+                      <span className="font-mono tabular-nums">
+                        {formatCurrency(receiptOrder.taxAmount, currency)}
+                      </span>
+                    </div>
+                  )}
+                  {receiptOrder.serviceChargeAmount > 0 && (
+                    <div className="flex justify-between" style={{ color: theme.textMuted }}>
+                      <span>Service Charge</span>
+                      <span className="font-mono tabular-nums">
+                        {formatCurrency(receiptOrder.serviceChargeAmount, currency)}
+                      </span>
+                    </div>
+                  )}
+                  <div className="pt-1.5 border-t flex justify-between text-sm font-bold" style={{ borderColor: theme.borderColor }}>
+                    <span>Total Paid / Due</span>
+                    <span className="font-mono tabular-nums">
+                      {formatCurrency(receiptOrder.grandTotal, currency)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2.5">
+                <div className="grid grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => handleCopyReceiptOrderId(receiptOrder.id)}
+                    className={`min-h-[42px] px-3 py-2 text-xs font-semibold border flex items-center justify-center gap-1.5 cursor-pointer transition-opacity hover:opacity-85 ${theme.buttonRadiusClass}`}
+                    style={{
+                      backgroundColor: theme.subtleBg,
+                      borderColor: theme.borderColor,
+                      color: theme.textPrimary,
+                    }}
+                  >
+                    {copiedOrderId ? (
+                      <>
+                        <Check className="w-3.5 h-3.5" style={{ color: theme.primaryColor }} />
+                        <span>Copied ID</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copy Order ID</span>
+                      </>
+                    )}
+                  </button>
+
+                  {onTrackOrder && (
+                    <button
+                      type="button"
+                      onClick={() => handleTrackThisOrder(receiptOrder.id)}
+                      className={`min-h-[42px] px-3 py-2 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-opacity hover:opacity-90 ${theme.buttonRadiusClass}`}
+                      style={{
+                        backgroundColor: theme.primaryColor,
+                        color: theme.onPrimaryText,
+                      }}
+                    >
+                      <PackageSearch className="w-3.5 h-3.5" />
+                      <span>Track This Order</span>
+                    </button>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleCloseDrawer}
+                  className={`w-full min-h-[42px] px-4 py-2 text-xs sm:text-sm font-semibold border cursor-pointer transition-opacity hover:opacity-85 ${theme.buttonRadiusClass}`}
+                  style={
+                    onTrackOrder
+                      ? {
+                          backgroundColor: theme.cardBg,
+                          borderColor: theme.borderColor,
+                          color: theme.textPrimary,
+                        }
+                      : {
+                          backgroundColor: theme.primaryColor,
+                          borderColor: theme.primaryColor,
+                          color: theme.onPrimaryText,
+                        }
+                  }
+                >
+                  Continue Shopping
+                </button>
+              </div>
+            </div>
+          ) : items.length === 0 ? (
+            <div className="py-16 text-center space-y-4">
+              <div
+                className="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center border"
+                style={{ backgroundColor: theme.subtleBg, borderColor: theme.borderColor }}
+              >
+                <ShoppingBag className="w-6 h-6" style={{ color: theme.textMuted }} />
+              </div>
+              <div className="space-y-1">
+                <p className="text-base font-bold">Your shopping bag is empty</p>
+                <p className="text-xs" style={{ color: theme.textMuted }}>
+                  Add items from {store.name} to view totals and check out.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleCloseDrawer}
+                className={`min-h-[40px] px-5 py-2 text-xs font-semibold cursor-pointer ${theme.buttonRadiusClass}`}
+                style={{
+                  backgroundColor: theme.primaryColor,
+                  color: theme.onPrimaryText,
+                }}
+              >
+                Browse Products
+              </button>
+            </div>
+          ) : step === 'cart' ? (
+            <>
+              {amountToFreeShipping > 0 && (
+                <div
+                  className="p-3 rounded-xl border text-xs font-medium"
+                  style={{ backgroundColor: theme.subtleBg, borderColor: theme.borderColor }}
+                >
+                  Add{' '}
+                  <span className="font-mono tabular-nums font-bold">
+                    {formatCurrency(amountToFreeShipping, currency)}
+                  </span>{' '}
+                  more to unlock free delivery.
+                </div>
+              )}
+
+              <div className="space-y-3">
+                {items.map((item) => (
+                  <div
+                    key={item.key}
+                    className="p-3 rounded-xl border flex gap-3"
+                    style={{ borderColor: theme.borderColor }}
+                  >
+                    <img
+                      src={item.imageUrl || fallbackImg}
+                      alt={item.name}
+                      referrerPolicy="no-referrer"
+                      className="w-16 h-16 rounded-lg object-cover border shrink-0"
+                      style={{ borderColor: theme.borderColor }}
+                    />
+
+                    <div className="flex-1 min-w-0 flex flex-col justify-between gap-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-bold truncate">{item.name}</p>
+                          {item.variant && (
+                            <p className="text-[11px]" style={{ color: theme.textMuted }}>
+                              {item.variant}
+                            </p>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          aria-label={`Remove ${item.name}`}
+                          onClick={() => onRemoveItem(item.key)}
+                          className="p-1 opacity-70 hover:opacity-100 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <div
+                          className="inline-flex items-center border rounded-lg"
+                          style={{ borderColor: theme.borderColor }}
+                        >
+                          <button
+                            type="button"
+                            aria-label="Decrease quantity"
+                            onClick={() => onUpdateQuantity(item.key, -1)}
+                            className="w-7 h-7 flex items-center justify-center cursor-pointer"
+                          >
+                            <Minus className="w-3 h-3" />
+                          </button>
+                          <span className="w-7 text-center text-xs font-bold tabular-nums">
+                            {item.quantity}
+                          </span>
+                          <button
+                            type="button"
+                            aria-label="Increase quantity"
+                            onClick={() => onUpdateQuantity(item.key, 1)}
+                            className="w-7 h-7 flex items-center justify-center cursor-pointer"
+                          >
+                            <Plus className="w-3 h-3" />
+                          </button>
+                        </div>
+
+                        <span className="text-sm font-bold font-mono tabular-nums">
+                          {formatCurrency(item.unitPrice * item.quantity, currency)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <form
+              id="checkout-form"
+              onSubmit={handleCheckoutSubmit}
+              onFocusCapture={handleFormFocusCapture}
+              onBlurCapture={handleFormBlurCapture}
+              noValidate
+              className="space-y-4"
+            >
+              {/* Auto-Fill Information Settings Banner */}
+              <div
+                className="p-3 rounded-xl border flex items-center justify-between gap-2.5 text-xs"
+                style={{
+                  backgroundColor: theme.subtleBg,
+                  borderColor: theme.borderColor,
+                }}
+              >
+                <div className="flex items-start gap-2 min-w-0">
+                  {hasSavedBuyerInfo ? (
+                    <Sparkles
+                      className="w-4 h-4 shrink-0 mt-0.5"
+                      style={{ color: theme.accentTextColor }}
+                    />
+                  ) : (
+                    <SlidersHorizontal
+                      className="w-4 h-4 shrink-0 mt-0.5"
+                      style={{ color: theme.textMuted }}
+                    />
+                  )}
+                  <div className="min-w-0">
+                    <p className="font-semibold">
+                      {hasSavedBuyerInfo
+                        ? 'Auto-filled from Information Settings'
+                        : 'Save details for faster checkout'}
+                    </p>
+                    <p className="text-[11px]" style={{ color: theme.textMuted }}>
+                      {hasSavedBuyerInfo
+                        ? 'Review or edit your delivery details below anytime.'
+                        : 'Set your checkout details once in Information Settings.'}
+                    </p>
+                  </div>
+                </div>
+                {onOpenInfoSettings && (
+                  <button
+                    type="button"
+                    onClick={onOpenInfoSettings}
+                    className={`px-2.5 py-1.5 text-[11px] font-semibold border shrink-0 cursor-pointer hover:opacity-85 ${theme.chipRadiusClass}`}
+                    style={{
+                      backgroundColor: theme.cardBg,
+                      borderColor: theme.borderColor,
+                      color: theme.accentTextColor,
+                    }}
+                  >
+                    {hasSavedBuyerInfo ? 'Edit Info' : 'Set Info'}
+                  </button>
+                )}
+              </div>
+
+              <div
+                className={`space-y-1.5 ${
+                  shakeForm && fieldErrors.customerName ? 'auth-shake' : ''
+                }`}
+              >
+                <label htmlFor="checkout-full-name" className="block text-xs font-semibold">
+                  Full Name
+                </label>
+                <input
+                  ref={fullNameRef}
+                  id="checkout-full-name"
+                  type="text"
+                  autoComplete="name"
+                  aria-invalid={Boolean(fieldErrors.customerName)}
+                  value={customerName}
+                  onChange={(e) => {
+                    setCustomerName(e.target.value);
+                    if (fieldErrors.customerName) {
+                      setFieldErrors((prev) => ({ ...prev, customerName: undefined }));
+                    }
+                  }}
+                  placeholder="Juan Dela Cruz"
+                  className={`w-full min-h-[42px] px-3 py-2 text-sm border rounded-xl outline-none transition-all ${
+                    fieldErrors.customerName
+                      ? 'ring-4 ring-rose-500/20 focus:ring-rose-500/25'
+                      : 'focus:ring-2'
+                  }`}
+                  style={{
+                    backgroundColor: theme.canvasBg,
+                    borderColor: fieldErrors.customerName ? '#f43f5e' : theme.borderColor,
+                    color: theme.textPrimary,
+                  }}
+                />
+                {fieldErrors.customerName && (
+                  <p
+                    className={`text-xs font-medium mt-1 ${
+                      theme.isDark ? 'text-rose-400' : 'text-rose-600'
+                    }`}
+                  >
+                    {fieldErrors.customerName}
+                  </p>
+                )}
+              </div>
+
+              <div
+                className={`space-y-1.5 ${
+                  shakeForm && fieldErrors.phoneNumber ? 'auth-shake' : ''
+                }`}
+              >
+                <label htmlFor="checkout-phone" className="block text-xs font-semibold">
+                  Phone Number
+                </label>
+                <input
+                  ref={phoneRef}
+                  id="checkout-phone"
+                  type="tel"
+                  autoComplete="tel"
+                  aria-invalid={Boolean(fieldErrors.phoneNumber)}
+                  value={phoneNumber}
+                  onChange={(e) => {
+                    setPhoneNumber(e.target.value);
+                    if (fieldErrors.phoneNumber) {
+                      setFieldErrors((prev) => ({ ...prev, phoneNumber: undefined }));
+                    }
+                  }}
+                  placeholder="0917 555 0123"
+                  className={`w-full min-h-[42px] px-3 py-2 text-sm font-mono border rounded-xl outline-none transition-all ${
+                    fieldErrors.phoneNumber
+                      ? 'ring-4 ring-rose-500/20 focus:ring-rose-500/25'
+                      : 'focus:ring-2'
+                  }`}
+                  style={{
+                    backgroundColor: theme.canvasBg,
+                    borderColor: fieldErrors.phoneNumber ? '#f43f5e' : theme.borderColor,
+                    color: theme.textPrimary,
+                  }}
+                />
+                {fieldErrors.phoneNumber && (
+                  <p
+                    className={`text-xs font-medium mt-1 ${
+                      theme.isDark ? 'text-rose-400' : 'text-rose-600'
+                    }`}
+                  >
+                    {fieldErrors.phoneNumber}
+                  </p>
+                )}
+              </div>
+
+              <div
+                className={`space-y-1.5 ${
+                  shakeForm && fieldErrors.deliveryAddress ? 'auth-shake' : ''
+                }`}
+              >
+                <label htmlFor="checkout-address" className="block text-xs font-semibold">
+                  Delivery Address
+                </label>
+                <textarea
+                  ref={addressRef}
+                  id="checkout-address"
+                  rows={2}
+                  aria-invalid={Boolean(fieldErrors.deliveryAddress)}
+                  value={deliveryAddress}
+                  onChange={(e) => {
+                    setDeliveryAddress(e.target.value);
+                    if (fieldErrors.deliveryAddress) {
+                      setFieldErrors((prev) => ({ ...prev, deliveryAddress: undefined }));
+                    }
+                  }}
+                  placeholder="Street, Barangay, City, Landmark"
+                  className={`w-full px-3 py-2.5 text-sm border rounded-xl outline-none transition-all resize-none ${
+                    fieldErrors.deliveryAddress
+                      ? 'ring-4 ring-rose-500/20 focus:ring-rose-500/25'
+                      : 'focus:ring-2'
+                  }`}
+                  style={{
+                    backgroundColor: theme.canvasBg,
+                    borderColor: fieldErrors.deliveryAddress ? '#f43f5e' : theme.borderColor,
+                    color: theme.textPrimary,
+                  }}
+                />
+                {fieldErrors.deliveryAddress && (
+                  <p
+                    className={`text-xs font-medium mt-1 ${
+                      theme.isDark ? 'text-rose-400' : 'text-rose-600'
+                    }`}
+                  >
+                    {fieldErrors.deliveryAddress}
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="checkout-order-notes" className="block text-xs font-semibold">
+                  Order Notes <span style={{ color: theme.textMuted }}>(Optional)</span>
+                </label>
+                <textarea
+                  id="checkout-order-notes"
+                  rows={3}
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="Delivery gate code, utensils, special request..."
+                  className="w-full min-h-[84px] px-3 py-2.5 text-sm border rounded-xl focus:outline-none focus:ring-2 resize-y"
+                  style={{
+                    backgroundColor: theme.canvasBg,
+                    borderColor: theme.borderColor,
+                    color: theme.textPrimary,
+                  }}
+                />
+              </div>
+
+              {/* Payment Method Selection */}
+              <div className="space-y-2 pt-2">
+                <label className="block text-xs font-semibold">Select Payment Method</label>
+                {enabledPaymentMethods.length === 0 ? (
+                  <div
+                    className="p-3.5 rounded-xl border text-xs flex items-start gap-2.5"
+                    style={{
+                      backgroundColor: theme.subtleBg,
+                      borderColor: theme.borderColor,
+                      color: theme.textMuted,
+                    }}
+                  >
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" style={{ color: theme.primaryColor }} />
+                    <span>
+                      No payment methods have been enabled by this store yet. Please check back once the merchant sets up payment options.
+                    </span>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {enabledPaymentMethods.map((method) => {
+                      const Icon = method.icon;
+                      const active = selectedPaymentKey === method.key;
+                      return (
+                        <button
+                          key={method.key}
+                          type="button"
+                          onClick={() => setSelectedPaymentKey(method.key)}
+                          className="w-full p-3 rounded-xl border text-left flex items-center justify-between gap-3 cursor-pointer transition-colors"
+                          style={
+                            active
+                              ? {
+                                  borderColor: theme.primaryColor,
+                                  backgroundColor: theme.subtleBg,
+                                }
+                              : {
+                                  borderColor: theme.borderColor,
+                                  backgroundColor: theme.cardBg,
+                                }
+                          }
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <Icon className="w-4 h-4 shrink-0" style={{ color: theme.primaryColor }} />
+                            <div className="min-w-0">
+                              <p className="text-xs font-bold truncate">{method.label}</p>
+                              <p className="text-[11px] truncate" style={{ color: theme.textMuted }}>
+                                {method.subtitle}
+                              </p>
+                            </div>
+                          </div>
+                          <span
+                            className="w-4 h-4 rounded-full border flex items-center justify-center shrink-0"
+                            style={{
+                              borderColor: active ? theme.primaryColor : theme.borderColor,
+                            }}
+                          >
+                            {active && (
+                              <span
+                                className="w-2 h-2 rounded-full"
+                                style={{ backgroundColor: theme.primaryColor }}
+                              />
+                            )}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {selectedPaymentKey === 'cod' && paymentSettings.codInstructions && (
+                  <div
+                    className="p-3 rounded-xl border text-xs"
+                    style={{ backgroundColor: theme.subtleBg, borderColor: theme.borderColor, color: theme.textMuted }}
+                  >
+                    {paymentSettings.codInstructions}
+                  </div>
+                )}
+              </div>
+
+              <label
+                className="flex items-start gap-2.5 p-3 rounded-xl border text-xs cursor-pointer select-none"
+                style={{
+                  backgroundColor: theme.subtleBg,
+                  borderColor: theme.borderColor,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={saveInfoForLater}
+                  onChange={(e) => setSaveInfoForLater(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 rounded cursor-pointer accent-current shrink-0"
+                  style={{ color: theme.primaryColor }}
+                />
+                <span>
+                  <strong className="block font-semibold">
+                    {hasSavedBuyerInfo
+                      ? 'Update my saved Information Settings with these details'
+                      : 'Save these details to Information Settings for next checkout'}
+                  </strong>
+                  <span className="text-[11px]" style={{ color: theme.textMuted }}>
+                    Automatically fills your name, phone, address, notes, and preferred payment.
+                  </span>
+                </span>
+              </label>
+            </form>
+          )}
+          </div>
+
+          {/* Mobile keyboard-active inline totals & Place Order footer (scrolls with form instead of riding up over inputs) */}
+          {items.length > 0 && step === 'checkout' && (isInputFocused || isKeyboardOpen) && (
+            <div
+              className="p-5 border-t space-y-4 shrink-0 md:hidden"
+              style={{ backgroundColor: theme.subtleBg, borderColor: theme.borderColor }}
+            >
+              <dl className="space-y-1.5 text-xs">
+                <div className="flex justify-between">
+                  <dt style={{ color: theme.textMuted }}>Subtotal</dt>
+                  <dd className="font-mono tabular-nums font-medium">
+                    {formatCurrency(subtotal, currency)}
+                  </dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt style={{ color: theme.textMuted }}>Delivery Fee</dt>
+                  <dd className="font-mono tabular-nums font-medium">
+                    {freeShippingUnlocked
+                      ? 'Free Shipping'
+                      : formatCurrency(deliveryFee, currency)}
+                  </dd>
+                </div>
+                {taxAmount > 0 && (
+                  <div className="flex justify-between">
+                    <dt style={{ color: theme.textMuted }}>
+                      Tax / VAT ({paymentSettings.taxPercent}%)
+                    </dt>
+                    <dd className="font-mono tabular-nums font-medium">
+                      {formatCurrency(taxAmount, currency)}
+                    </dd>
+                  </div>
+                )}
+                {serviceChargeAmount > 0 && (
+                  <div className="flex justify-between">
+                    <dt style={{ color: theme.textMuted }}>
+                      Service Charge ({paymentSettings.serviceChargePercent}%)
+                    </dt>
+                    <dd className="font-mono tabular-nums font-medium">
+                      {formatCurrency(serviceChargeAmount, currency)}
+                    </dd>
+                  </div>
+                )}
+                <div
+                  className="pt-2 border-t flex justify-between text-base font-bold"
+                  style={{ borderColor: theme.borderColor }}
+                >
+                  <dt>Grand Total</dt>
+                  <dd className="font-mono tabular-nums">{formatCurrency(grandTotal, currency)}</dd>
+                </div>
+              </dl>
+
+              <button
+                key="place-order-submit-inline-btn"
+                type="submit"
+                form="checkout-form"
+                disabled={!selectedMethod}
+                className={`w-full min-h-[46px] px-5 py-3 text-sm font-semibold transition-opacity ${
+                  selectedMethod ? 'cursor-pointer hover:opacity-90' : 'opacity-50 cursor-not-allowed'
+                } ${theme.buttonRadiusClass}`}
+                style={{
+                  backgroundColor: theme.primaryColor,
+                  color: theme.onPrimaryText,
+                }}
+              >
+                Place Order — {formatCurrency(grandTotal, currency)}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Auto-Calculated Totals Footer (Cart & Checkout steps; unpinned on mobile while keyboard/input active) */}
+        {items.length > 0 && step !== 'receipt' && (
+          <div
+            className={`${
+              step === 'checkout' && (isInputFocused || isKeyboardOpen)
+                ? 'hidden md:block'
+                : ''
+            } p-5 border-t space-y-4 shrink-0`}
+            style={{ backgroundColor: theme.subtleBg, borderColor: theme.borderColor }}
+          >
+            <dl className="space-y-1.5 text-xs">
+              <div className="flex justify-between">
+                <dt style={{ color: theme.textMuted }}>Subtotal</dt>
+                <dd className="font-mono tabular-nums font-medium">
+                  {formatCurrency(subtotal, currency)}
+                </dd>
+              </div>
+              <div className="flex justify-between">
+                <dt style={{ color: theme.textMuted }}>Delivery Fee</dt>
+                <dd className="font-mono tabular-nums font-medium">
+                  {freeShippingUnlocked
+                    ? 'Free Shipping'
+                    : formatCurrency(deliveryFee, currency)}
+                </dd>
+              </div>
+              {taxAmount > 0 && (
+                <div className="flex justify-between">
+                  <dt style={{ color: theme.textMuted }}>
+                    Tax / VAT ({paymentSettings.taxPercent}%)
+                  </dt>
+                  <dd className="font-mono tabular-nums font-medium">
+                    {formatCurrency(taxAmount, currency)}
+                  </dd>
+                </div>
+              )}
+              {serviceChargeAmount > 0 && (
+                <div className="flex justify-between">
+                  <dt style={{ color: theme.textMuted }}>
+                    Service Charge ({paymentSettings.serviceChargePercent}%)
+                  </dt>
+                  <dd className="font-mono tabular-nums font-medium">
+                    {formatCurrency(serviceChargeAmount, currency)}
+                  </dd>
+                </div>
+              )}
+              <div
+                className="pt-2 border-t flex justify-between text-base font-bold"
+                style={{ borderColor: theme.borderColor }}
+              >
+                <dt>Grand Total</dt>
+                <dd className="font-mono tabular-nums">{formatCurrency(grandTotal, currency)}</dd>
+              </div>
+            </dl>
+
+            {step === 'cart' ? (
+              <button
+                key="proceed-to-checkout-btn"
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  if (!state.currentBuyer) {
+                    setShowBuyerAuth(true);
+                    return;
+                  }
+                  setFieldErrors({});
+                  setShakeForm(false);
+                  applySavedCheckoutInfo();
+                  setStep('checkout');
+                }}
+                className={`w-full min-h-[46px] px-5 py-3 text-sm font-semibold cursor-pointer transition-opacity hover:opacity-90 ${theme.buttonRadiusClass}`}
+                style={{
+                  backgroundColor: theme.primaryColor,
+                  color: theme.onPrimaryText,
+                }}
+              >
+                Proceed to Checkout
+              </button>
+            ) : (
+              <button
+                key="place-order-submit-btn"
+                type="submit"
+                form="checkout-form"
+                disabled={!selectedMethod}
+                className={`w-full min-h-[46px] px-5 py-3 text-sm font-semibold transition-opacity ${
+                  selectedMethod ? 'cursor-pointer hover:opacity-90' : 'opacity-50 cursor-not-allowed'
+                } ${theme.buttonRadiusClass}`}
+                style={{
+                  backgroundColor: theme.primaryColor,
+                  color: theme.onPrimaryText,
+                }}
+              >
+                Place Order — {formatCurrency(grandTotal, currency)}
+              </button>
+            )}
+          </div>
+        )}
+      </aside>
+
+      <BuyerAuthModal
+        isOpen={showBuyerAuth}
+        storeId={store.id}
+        storeName={store.name}
+        onClose={() => setShowBuyerAuth(false)}
+        onSuccess={(buyer?: BuyerAccount) => {
+          setShowBuyerAuth(false);
+          applySavedCheckoutInfo(buyer?.savedCheckoutInfo ?? null, buyer?.name);
+          setStep('checkout');
+        }}
+      />
+
+      {paymentQrModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={qrPaymentDetails.title}
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-[2px]"
+        >
+          <div
+            className="fixed inset-0"
+            onClick={() => setPaymentQrModalOpen(false)}
+            aria-hidden="true"
+          />
+
+          <div
+            className="relative z-10 w-full max-w-md max-h-[92dvh] flex flex-col border rounded-2xl shadow-2xl overflow-hidden"
+            style={{
+              backgroundColor: theme.cardBg,
+              borderColor: theme.borderColor,
+              color: theme.textPrimary,
+              fontFamily: theme.bodyFontFamily,
+            }}
+          >
+            {/* Modal Header */}
+            <div
+              className="px-5 py-4 border-b flex items-center justify-between gap-3 shrink-0"
+              style={{ borderColor: theme.borderColor }}
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div
+                  className={`w-9 h-9 flex items-center justify-center border shrink-0 ${theme.chipRadiusClass}`}
+                  style={{
+                    backgroundColor: theme.subtleBg,
+                    borderColor: theme.borderColor,
+                    color: theme.primaryColor,
+                  }}
+                >
+                  <QrCode className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <h3
+                    className="text-base font-bold truncate"
+                    style={{ fontFamily: theme.headingFontFamily }}
+                  >
+                    {qrPaymentDetails.title}
+                  </h3>
+                  <p className="text-xs font-mono tabular-nums font-semibold" style={{ color: theme.primaryColor }}>
+                    Total: {formatCurrency(grandTotal, currency)}
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setPaymentQrModalOpen(false)}
+                aria-label="Close payment QR modal"
+                className={`w-9 h-9 border flex items-center justify-center shrink-0 cursor-pointer ${theme.buttonRadiusClass}`}
+                style={{ borderColor: theme.borderColor, color: theme.textPrimary }}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Modal Body: QR -> Number & Account Name -> Upload Proof */}
+            <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3.5">
+              {/* 1. QR Code */}
+              {qrPaymentDetails.qrUrl ? (
+                <div className="flex flex-col items-center text-center space-y-2">
+                  <div className="p-2.5 bg-white rounded-2xl border border-slate-200 shadow-xs inline-flex items-center justify-center">
+                    <img
+                      src={qrPaymentDetails.qrUrl}
+                      alt={`${qrPaymentDetails.title} QR Code`}
+                      className="w-36 h-36 sm:w-44 sm:h-44 object-contain rounded-lg"
+                    />
+                  </div>
+                  <p className="text-xs" style={{ color: theme.textMuted }}>
+                    Scan the QR code to pay{' '}
+                    <strong style={{ color: theme.textPrimary }}>
+                      {formatCurrency(grandTotal, currency)}
+                    </strong>
+                  </p>
+                </div>
+              ) : (
+                <div
+                  className="p-3.5 rounded-xl border text-center space-y-1"
+                  style={{ backgroundColor: theme.subtleBg, borderColor: theme.borderColor }}
+                >
+                  <QrCode className="w-6 h-6 mx-auto opacity-60" style={{ color: theme.textMuted }} />
+                  <p className="text-xs font-medium" style={{ color: theme.textMuted }}>
+                    Send{' '}
+                    <strong style={{ color: theme.textPrimary }}>
+                      {formatCurrency(grandTotal, currency)}
+                    </strong>{' '}
+                    using the account details below and upload your receipt.
+                  </p>
+                </div>
+              )}
+
+              {/* 2. Account Number & Account Name directly below QR */}
+              <div
+                className="p-3.5 rounded-xl border text-center space-y-2"
+                style={{ backgroundColor: theme.subtleBg, borderColor: theme.borderColor }}
+              >
+                <div className="space-y-0.5">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: theme.textMuted }}>
+                    Account Name
+                  </p>
+                  <p className="text-sm font-bold" style={{ color: theme.textPrimary }}>
+                    {qrPaymentDetails.accountName}
+                  </p>
+                </div>
+
+                <div
+                  className="pt-2 border-t space-y-1"
+                  style={{ borderColor: theme.borderColor }}
+                >
+                  <p className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: theme.textMuted }}>
+                    {qrPaymentDetails.numberLabel}
+                  </p>
+                  <div className="flex items-center justify-center gap-2 flex-wrap">
+                    <span className="text-base sm:text-lg font-mono font-bold tracking-wide select-all">
+                      {qrPaymentDetails.accountNumber}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyAccountNumber(qrPaymentDetails.accountNumber)}
+                      aria-label={`Copy ${qrPaymentDetails.numberLabel}`}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold border rounded-md cursor-pointer transition-opacity hover:opacity-80"
+                      style={{
+                        backgroundColor: theme.cardBg,
+                        borderColor: theme.borderColor,
+                        color: theme.textPrimary,
+                      }}
+                    >
+                      {copiedAccountNumber ? (
+                        <>
+                          <Check className="w-3 h-3" style={{ color: theme.primaryColor }} />
+                          <span>Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3 h-3" />
+                          <span>Copy</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {qrPaymentDetails.extraInfo && (
+                  <p className="text-[11px] pt-0.5" style={{ color: theme.textMuted }}>
+                    {qrPaymentDetails.extraInfo}
+                  </p>
+                )}
+              </div>
+
+              {/* 3. Upload Proof of Payment directly below Number */}
+              <div ref={proofBoxRef} className="space-y-2">
+                <label className="block text-xs font-semibold">
+                  Upload Proof of Payment <span className="text-rose-500">*</span>
+                </label>
+
+                <input
+                  ref={proofFileInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleProofFileChange}
+                  className="hidden"
+                  aria-label="Upload Proof of Payment"
+                />
+
+                {paymentProofUrl ? (
+                  <div
+                    className="p-3 rounded-xl border space-y-2.5"
+                    style={{ backgroundColor: theme.subtleBg, borderColor: theme.borderColor }}
+                  >
+                    <div className="flex items-center gap-3">
+                      <img
+                        src={paymentProofUrl}
+                        alt="Uploaded payment proof"
+                        className="w-16 h-16 rounded-lg object-cover border bg-white shrink-0"
+                        style={{ borderColor: theme.borderColor }}
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-bold flex items-center gap-1.5">
+                          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" style={{ color: theme.primaryColor }} />
+                          <span>Payment Receipt Uploaded</span>
+                        </p>
+                        <p className="text-[11px] mt-0.5" style={{ color: theme.textMuted }}>
+                          Ready to place your order.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => proofFileInputRef.current?.click()}
+                        className={`flex-1 min-h-[36px] px-3 py-1.5 text-xs font-semibold border cursor-pointer transition-opacity hover:opacity-85 ${theme.buttonRadiusClass}`}
+                        style={{
+                          backgroundColor: theme.cardBg,
+                          borderColor: theme.borderColor,
+                          color: theme.textPrimary,
+                        }}
+                      >
+                        Change Receipt
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPaymentProofUrl('');
+                          setPaymentProofError(null);
+                        }}
+                        aria-label="Remove payment receipt"
+                        className={`min-h-[36px] px-3 py-1.5 text-xs font-semibold border cursor-pointer transition-opacity hover:opacity-85 ${theme.buttonRadiusClass}`}
+                        style={{
+                          backgroundColor: theme.cardBg,
+                          borderColor: theme.borderColor,
+                          color: theme.textMuted,
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => proofFileInputRef.current?.click()}
+                    className={`w-full p-4 rounded-xl border border-dashed flex flex-col items-center justify-center text-center gap-1.5 cursor-pointer transition-all ${
+                      shakeProofUpload ? 'auth-shake' : ''
+                    } ${paymentProofError ? 'ring-4 ring-rose-500/20' : 'hover:opacity-85'}`}
+                    style={{
+                      backgroundColor: theme.subtleBg,
+                      borderColor: paymentProofError ? '#f43f5e' : theme.borderColor,
+                    }}
+                  >
+                    <Upload
+                      className="w-5 h-5"
+                      style={{ color: paymentProofError ? '#f43f5e' : theme.primaryColor }}
+                    />
+                    <span className="text-xs font-bold">
+                      Tap to Upload Proof of Payment (Receipt)
+                    </span>
+                    <span className="text-[11px]" style={{ color: theme.textMuted }}>
+                      PNG, JPG, or screenshot of your transfer receipt
+                    </span>
+                  </button>
+                )}
+
+                {paymentProofError && (
+                  <p
+                    role="alert"
+                    className={`flex items-center gap-1.5 text-xs font-medium ${
+                      theme.isDark ? 'text-rose-400' : 'text-rose-600'
+                    }`}
+                  >
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{paymentProofError}</span>
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Modal Footer: Place Order Button */}
+            <div
+              className="p-4 sm:p-5 border-t shrink-0"
+              style={{ backgroundColor: theme.subtleBg, borderColor: theme.borderColor }}
+            >
+              <button
+                type="button"
+                onClick={handleConfirmQrPaymentOrder}
+                className={`w-full min-h-[46px] px-5 py-3 text-sm font-semibold cursor-pointer transition-opacity hover:opacity-90 ${theme.buttonRadiusClass}`}
+                style={{
+                  backgroundColor: theme.primaryColor,
+                  color: theme.onPrimaryText,
+                }}
+              >
+                Place Order — {formatCurrency(grandTotal, currency)}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

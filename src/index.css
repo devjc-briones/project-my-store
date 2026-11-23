@@ -1,0 +1,534 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', 'DM Sans', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+    --spring-easing: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  html {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: #f8fafc;
+    color: #0f172a;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Smooth Burger -> X Line Transitions */
+.burger-line {
+  transition:
+    transform 0.38s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 0.25s ease;
+  transform-origin: center;
+}
+
+.menu-open .line-1 {
+  transform: translateY(7px) rotate(45deg);
+}
+
+.menu-open .line-2 {
+  opacity: 0;
+  transform: scaleX(0);
+}
+
+.menu-open .line-3 {
+  transform: translateY(-7px) rotate(-45deg);
+}
+
+/* Smooth Initials <-> X Morph for Dashboard Account Toggle */
+.dash-morph-layer {
+  transition:
+    transform 0.38s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.dash-x-bar {
+  transition: transform 0.38s cubic-bezier(0.22, 1, 0.36, 1);
+  transform-origin: center;
+}
+
+.dash-menu-open .dash-x-bar-1 {
+  transform: rotate(45deg);
+}
+
+.dash-menu-open .dash-x-bar-2 {
+  transform: rotate(-45deg);
+}
+
+/* Staggered Mobile Drawer Item Reveal */
+.nav-item-stagger {
+  opacity: 0;
+  transform: translateY(14px);
+  transition:
+    opacity 0.35s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.drawer-active .nav-item-stagger {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.drawer-active .nav-item-stagger:nth-child(1) {
+  transition-delay: 0.06s;
+}
+.drawer-active .nav-item-stagger:nth-child(2) {
+  transition-delay: 0.11s;
+}
+.drawer-active .nav-item-stagger:nth-child(3) {
+  transition-delay: 0.16s;
+}
+.drawer-active .nav-item-stagger:nth-child(4) {
+  transition-delay: 0.21s;
+}
+.drawer-active .nav-item-stagger:nth-child(5) {
+  transition-delay: 0.26s;
+}
+.drawer-active .nav-item-stagger:nth-child(6) {
+  transition-delay: 0.31s;
+}
+
+/* Admin Floating Drawer Items & View Transitions */
+.admin-drawer-item {
+  opacity: 0;
+  transform: translateY(10px);
+  transition:
+    opacity 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 0.2s ease,
+    color 0.2s ease;
+}
+
+.drawer-active .admin-drawer-item {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.drawer-active .admin-drawer-item:nth-child(1) { transition-delay: 0.04s; }
+.drawer-active .admin-drawer-item:nth-child(2) { transition-delay: 0.08s; }
+.drawer-active .admin-drawer-item:nth-child(3) { transition-delay: 0.12s; }
+.drawer-active .admin-drawer-item:nth-child(4) { transition-delay: 0.16s; }
+.drawer-active .admin-drawer-item:nth-child(5) { transition-delay: 0.20s; }
+.drawer-active .admin-drawer-item:nth-child(6) { transition-delay: 0.24s; }
+
+@keyframes adminViewFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.admin-view-animate {
+  animation: adminViewFadeIn 0.22s ease-out forwards;
+}
+
+/* Auth Card: Segmented Pill, Dynamic Viewports & Sliding Panels */
+.auth-tab-pill {
+  transition: transform 0.42s var(--spring-easing);
+}
+
+.auth-card-viewport,
+.auth-forms-viewport {
+  position: relative;
+  overflow: hidden;
+  transition: height 0.45s var(--spring-easing);
+}
+
+.auth-view-panel,
+.auth-form-panel {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  transition:
+    transform 0.46s var(--spring-easing),
+    opacity 0.35s ease,
+    filter 0.35s ease;
+  will-change: transform, opacity;
+}
+
+.auth-view-main.is-active,
+.auth-form-signin.is-active,
+.auth-form-signup.is-active,
+.auth-view-forgot.is-active {
+  transform: translateX(0) scale(1);
+  opacity: 1;
+  filter: blur(0px);
+  pointer-events: auto;
+  z-index: 2;
+}
+
+.auth-view-main.is-inactive,
+.auth-form-signin.is-inactive {
+  transform: translateX(-28%) scale(0.96);
+  opacity: 0;
+  filter: blur(3px);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.auth-view-forgot.is-inactive,
+.auth-form-signup.is-inactive {
+  transform: translateX(28%) scale(0.96);
+  opacity: 0;
+  filter: blur(3px);
+  pointer-events: none;
+  z-index: 1;
+}
+
+@keyframes authHeaderFadeUp {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.auth-header-enter {
+  animation: authHeaderFadeUp 0.38s var(--spring-easing) forwards;
+}
+
+@keyframes authShakeError {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20%,
+  60% {
+    transform: translateX(-5px);
+  }
+  40%,
+  80% {
+    transform: translateX(5px);
+  }
+}
+
+.auth-shake {
+  animation: authShakeError 0.38s ease-in-out;
+}
+
+/* Auto-repeating clip-path & subtle slide reveal for "mystore" wordmark */
+@keyframes mystoreRevealLoop {
+  0% {
+    clip-path: inset(-20% 100% -20% 0);
+    transform: translateX(-8px);
+    opacity: 0.15;
+  }
+  18% {
+    clip-path: inset(-20% 0 -20% 0);
+    transform: translateX(0px);
+    opacity: 1;
+  }
+  76% {
+    clip-path: inset(-20% 0 -20% 0);
+    transform: translateX(0px);
+    opacity: 1;
+  }
+  90% {
+    clip-path: inset(-20% 0 -20% 100%);
+    transform: translateX(6px);
+    opacity: 0.1;
+  }
+  100% {
+    clip-path: inset(-20% 100% -20% 0);
+    transform: translateX(-8px);
+    opacity: 0.15;
+  }
+}
+
+/* Subtle accent cursor/sweep line traveling during reveal */
+@keyframes mystoreSweepBar {
+  0% {
+    left: 0%;
+    opacity: 0;
+  }
+  8% {
+    opacity: 0.95;
+  }
+  18% {
+    left: 100%;
+    opacity: 0;
+  }
+  76% {
+    left: 100%;
+    opacity: 0;
+  }
+  84% {
+    opacity: 0.85;
+  }
+  90% {
+    left: 100%;
+    opacity: 0;
+  }
+  100% {
+    left: 0%;
+    opacity: 0;
+  }
+}
+
+/* Gentle micro-pulse on the storefront awning icon */
+@keyframes awningGentleLift {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  14% {
+    transform: translateY(-1.5px);
+  }
+  22% {
+    transform: translateY(0px);
+  }
+}
+
+.mystore-reveal-text {
+  display: inline-block;
+  animation: mystoreRevealLoop 5.2s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  will-change: clip-path, transform, opacity;
+}
+
+.mystore-sweep-line {
+  position: absolute;
+  top: 18%;
+  bottom: 18%;
+  width: 2px;
+  border-radius: 9999px;
+  background: linear-gradient(180deg, #2563EB 0%, #06B6D4 100%);
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.65);
+  animation: mystoreSweepBar 5.2s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  pointer-events: none;
+}
+
+.mystore-icon-motion {
+  transform-origin: center;
+  animation: awningGentleLift 5.2s ease-in-out infinite;
+}
+
+/* Seamless Right-to-Left Looping Promo Announcement Banner */
+@keyframes announcementMarqueeScroll {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-100%, 0, 0);
+  }
+}
+
+.announcement-marquee-item {
+  animation: announcementMarqueeScroll 16s linear infinite;
+  will-change: transform;
+}
+
+.announcement-marquee-track:hover .announcement-marquee-item,
+.announcement-marquee-track:active .announcement-marquee-item {
+  animation-play-state: paused;
+}
+
+/* Pro Premium Storefront Motion Choreography (compositor-only properties) */
+@keyframes proFadeSlideUp {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0) scale(0.985);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes proHeroMediaSettle {
+  0% {
+    opacity: 0.72;
+    transform: scale(1.045);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes proPageCrossfade {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.pro-hero-copy {
+  animation: proFadeSlideUp 0.52s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.pro-hero-media {
+  animation: proHeroMediaSettle 0.75s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.pro-page-enter {
+  animation: proPageCrossfade 0.32s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.pro-stagger-grid > * {
+  animation: proFadeSlideUp 0.48s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.pro-stagger-grid > *:nth-child(1) { animation-delay: 0.03s; }
+.pro-stagger-grid > *:nth-child(2) { animation-delay: 0.08s; }
+.pro-stagger-grid > *:nth-child(3) { animation-delay: 0.13s; }
+.pro-stagger-grid > *:nth-child(4) { animation-delay: 0.18s; }
+.pro-stagger-grid > *:nth-child(5) { animation-delay: 0.23s; }
+.pro-stagger-grid > *:nth-child(6) { animation-delay: 0.28s; }
+
+.pro-card-elevate {
+  transition:
+    transform 0.34s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 0.34s cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 0.24s ease;
+  will-change: transform;
+}
+
+.pro-card-elevate:hover {
+  transform: translate3d(0, -4px, 0);
+  box-shadow: 0 18px 36px -14px rgba(15, 23, 42, 0.16);
+}
+
+.pro-card-img {
+  transition: transform 0.62s cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+}
+
+.pro-card-elevate:hover .pro-card-img {
+  transform: scale(1.055);
+}
+
+.pro-quick-bar {
+  transition:
+    transform 0.28s cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 0.22s ease;
+}
+
+@media (hover: hover) {
+  .pro-card-elevate .pro-quick-bar {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+  }
+  .pro-card-elevate:hover .pro-quick-bar,
+  .pro-card-elevate:focus-within .pro-quick-bar {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.pro-btn-press {
+  transition:
+    transform 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 0.18s ease,
+    background-color 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.pro-btn-press:active:not(:disabled) {
+  transform: scale(0.975);
+}
+
+/* Flagship Hardware UI: Crisp Fade & Staggered Drawer Transitions */
+@keyframes flagshipViewFadeIn {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.flagship-view-animate {
+  animation: flagshipViewFadeIn 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.flagship-drawer-item {
+  opacity: 0;
+  transform: translate3d(0, 10px, 0);
+  transition:
+    opacity 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 0.2s ease,
+    color 0.2s ease;
+}
+
+.drawer-active .flagship-drawer-item {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+}
+
+.drawer-active .flagship-drawer-item:nth-child(1) { transition-delay: 0.05s; }
+.drawer-active .flagship-drawer-item:nth-child(2) { transition-delay: 0.09s; }
+.drawer-active .flagship-drawer-item:nth-child(3) { transition-delay: 0.13s; }
+.drawer-active .flagship-drawer-item:nth-child(4) { transition-delay: 0.17s; }
+.drawer-active .flagship-drawer-item:nth-child(5) { transition-delay: 0.21s; }
+.drawer-active .flagship-drawer-item:nth-child(6) { transition-delay: 0.25s; }
+.drawer-active .flagship-drawer-item:nth-child(7) { transition-delay: 0.29s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .burger-line,
+  .dash-morph-layer,
+  .dash-x-bar,
+  .nav-item-stagger,
+  .auth-tab-pill,
+  .auth-card-viewport,
+  .auth-forms-viewport,
+  .auth-view-panel,
+  .auth-form-panel,
+  .mystore-reveal-text,
+  .mystore-sweep-line,
+  .mystore-icon-motion,
+  .admin-drawer-item,
+  .announcement-marquee-item,
+  .pro-hero-copy,
+  .pro-hero-media,
+  .pro-page-enter,
+  .pro-stagger-grid > *,
+  .pro-card-elevate,
+  .pro-card-img,
+  .pro-quick-bar,
+  .pro-btn-press,
+  .flagship-drawer-item {
+    transition: none;
+    animation: none;
+  }
+  .pro-card-elevate:hover,
+  .pro-card-elevate:hover .pro-card-img {
+    transform: none;
+  }
+  .announcement-marquee-item {
+    white-space: normal;
+    text-align: center;
+  }
+  .announcement-marquee-duplicate {
+    display: none;
+  }
+  .auth-header-enter,
+  .auth-shake,
+  .admin-view-animate,
+  .flagship-view-animate {
+    animation: none;
+  }
+}
+
+
