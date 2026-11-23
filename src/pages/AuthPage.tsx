@@ -53,7 +53,7 @@ function getPasswordStrength(val: string) {
 }
 
 export function AuthPage() {
-  const { route, navigate, signInUser, signUpUser, pushToast } = useStore();
+  const { route, navigate, signInUser, signUpUser, resetUserPassword, pushToast } = useStore();
   const initialMode: AuthMode =
     route.name === 'login' && route.mode === 'signup' ? 'signup' : 'signin';
 
@@ -399,6 +399,7 @@ export function AuthPage() {
     setIsResetting(true);
 
     window.setTimeout(() => {
+      resetUserPassword(resetEmail.trim(), newPassword);
       setIsResetting(false);
       setResetSent(true);
       pushToast({

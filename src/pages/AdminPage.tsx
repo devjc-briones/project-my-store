@@ -27,6 +27,7 @@ import { useStore } from '../context/StoreContext';
 import { PLATFORM_PLANS } from '../data/plans';
 import {
   OrderFulfillmentStatus,
+  OrderPaymentStatus,
   Roles,
   Store,
   StoreStatus,
@@ -94,6 +95,7 @@ export function AdminPage() {
     recordSubscriptionPayment,
     adminToggleSubscriptionTxStatus,
     updateOrderStatus,
+    updateOrderPaymentStatus,
     platformPaymentSettings,
     updatePlatformPaymentSettings,
   } = useStore();
@@ -283,6 +285,18 @@ export function AdminPage() {
       type: 'success',
       title: `Order ${orderId} updated`,
       description: `Status set to ${status}.`,
+    });
+  };
+
+  const handleUpdateOrderPaymentStatus = (
+    orderId: string,
+    paymentStatus: OrderPaymentStatus
+  ) => {
+    updateOrderPaymentStatus(orderId, paymentStatus);
+    pushToast({
+      type: paymentStatus === 'paid' ? 'success' : 'info',
+      title: `Order ${orderId} payment updated`,
+      description: `Payment status set to ${paymentStatus.replace('_', ' ')}.`,
     });
   };
 
@@ -731,6 +745,7 @@ export function AdminPage() {
               orders={orders}
               buyers={buyers}
               onUpdateOrderStatus={handleUpdateOrderStatus}
+              onUpdateOrderPaymentStatus={handleUpdateOrderPaymentStatus}
             />
           )}
         </div>

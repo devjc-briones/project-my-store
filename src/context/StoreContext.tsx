@@ -7,10 +7,12 @@ import {
   GlobalAppState,
   IndustryTemplateId,
   OrderFulfillmentStatus,
+  OrderPaymentStatus,
   PaymentSettings,
   PlatformPaymentChannel,
   PlatformPaymentSettings,
   Product,
+  ROLE_TO_ID,
   Roles,
   Store,
   StoreBranding,
@@ -26,6 +28,13 @@ import { resolveTemplateAssetUrl } from '../data/templateAssets';
 import { buildStoreDomainUrl, generateUniqueStoreSlug, validateStoreSlug } from '../utils/domain';
 import { calculateSmartPricing } from '../utils/pricing';
 import { isUserPlanPastDue } from '../utils/billing';
+import {
+  clampNonNegative,
+  clampPercent,
+  clampStock,
+  deriveOrderPaymentStatus,
+  derivePaymentMethodKey,
+} from '../utils/supabaseMappers';
 import { AppRoute, buildRoutePath, parseRoute } from '../router/routes';
 
 const STORAGE_KEY = 'mystore_saas_state_v2';
@@ -77,6 +86,7 @@ interface StoreContextValue {
     password: string
   ) => { success: boolean; user?: User; error?: string };
   signInAdminUser: (email: string, password: string) => { success: boolean; error?: string };
+  resetUserPassword: (email: string, newPassword: string) => boolean;
   signOut: () => void;
   updateUserProfile: (
     updates: Partial<Pick<User, 'name' | 'email' | 'plan' | 'planPeriodEndsAt' | 'cancelAtPeriodEnd'>>
@@ -114,6 +124,11 @@ interface StoreContextValue {
     order: Omit<CustomerOrder, 'id' | 'status' | 'createdAt'>
   ) => CustomerOrder;
   updateOrderStatus: (orderId: string, status: OrderFulfillmentStatus) => void;
+  updateOrderPaymentStatus: (
+    orderId: string,
+    paymentStatus: OrderPaymentStatus,
+    verifiedBy?: string
+  ) => void;
 
   // Buyer Auth & Orders
   buyerSignUp: (input: {
@@ -144,6 +159,7 @@ interface StoreContextValue {
     paymentMethod: string;
     referenceId?: string;
     status?: SubscriptionTransaction['status'];
+    dueDate?: string;
     proofUrl?: string;
   }) => void;
   adminUpdateUser: (
@@ -197,12 +213,32 @@ function loadInitialState(): GlobalAppState {
       return INITIAL_SEED_STATE;
     }
 
-    parsed.users = Array.isArray(parsed.users) ? parsed.users : [];
-    parsed.buyers = Array.isArray(parsed.buyers) ? parsed.buyers : [];
-    parsed.placedOrders = Array.isArray(parsed.placedOrders) ? parsed.placedOrders : [];
+    parsed.users = (Array.isArray(parsed.users) ? parsed.users : []).map((u) => ({
+      ...u,
+      role: u.role ?? Roles.Seller,
+      roleId: u.roleId ?? ROLE_TO_ID[u.role ?? Roles.Seller],
+    }));
+    parsed.buyers = (Array.isArray(parsed.buyers) ? parsed.buyers : []).map((b) => ({
+      ...b,
+      role: b.role ?? Roles.Buyer,
+      roleId: b.roleId ?? 3,
+    }));
+    parsed.placedOrders = (Array.isArray(parsed.placedOrders) ? parsed.placedOrders : []).map(
+      (o) => {
+        const methodKey = derivePaymentMethodKey(o.paymentMethodKey, o.paymentMethod);
+        return {
+          ...o,
+          currency: o.currency ?? 'PHP',
+          paymentMethodKey: methodKey,
+          paymentStatus: deriveOrderPaymentStatus(methodKey, o.paymentStatus),
+          amountPaid: o.amountPaid ?? (o.paymentStatus === 'paid' ? o.grandTotal : 0),
+        };
+      }
+    );
     parsed.subscriptionTransactions = Array.isArray(parsed.subscriptionTransactions)
       ? parsed.subscriptionTransactions
       : [];
+    parsed.notifications = Array.isArray(parsed.notifications) ? parsed.notifications : [];
     parsed.paymentSettingsByStore = parsed.paymentSettingsByStore ?? {};
     parsed.platformPaymentSettings =
       parsed.platformPaymentSettings && Array.isArray(parsed.platformPaymentSettings.channels)
@@ -213,6 +249,10 @@ function loadInitialState(): GlobalAppState {
       ...s,
       branding: {
         ...s.branding,
+        backgroundMode: s.branding?.backgroundMode ?? 'light',
+        buttonStyle: s.branding?.buttonStyle ?? 'rounded',
+        fontPairing: s.branding?.fontPairing ?? 'modern-sans',
+        heroCtaLabel: s.branding?.heroCtaLabel ?? 'Shop Now',
         heroBannerUrl: resolveTemplateAssetUrl(s.branding?.heroBannerUrl),
         logoImageUrl: resolveTemplateAssetUrl(s.branding?.logoImageUrl),
       },
@@ -220,6 +260,9 @@ function loadInitialState(): GlobalAppState {
     parsed.products = parsed.products.map((p) => ({
       ...p,
       imageUrl: resolveTemplateAssetUrl(p.imageUrl),
+      variants: Array.isArray(p.variants)
+        ? p.variants.map((v, idx) => ({ ...v, sortOrder: v.sortOrder ?? idx }))
+        : [],
     }));
     return parsed;
   } catch {
@@ -391,10 +434,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         return { success: false, error: 'Password must be at least 6 characters.' };
       }
 
-      const existing = (state.users ?? []).find(
+      const existingUser = (state.users ?? []).find(
         (u) => u.email.toLowerCase() === normalizedEmail
       );
-      if (existing) {
+      const existingBuyer = (state.buyers ?? []).find(
+        (b) => b.email.toLowerCase() === normalizedEmail
+      );
+      if (existingUser || existingBuyer) {
         return {
           success: false,
           error: 'An account with this email already exists. Please sign in.',
@@ -408,10 +454,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         email: normalizedEmail,
         password,
         role: Roles.Seller,
+        roleId: 2,
         plan: 'starter',
         status: 'active',
         lastActiveAt: now,
         createdAt: now,
+        updatedAt: now,
       };
 
       setState((prev) => ({
@@ -422,7 +470,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       return { success: true, user: newUser };
     },
-    [state.users]
+    [state.buyers, state.users]
   );
 
   const signInUser = useCallback(
@@ -498,6 +546,28 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [state.users]
   );
 
+  const resetUserPassword = useCallback((email: string, newPassword: string): boolean => {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !newPassword || newPassword.length < 6) return false;
+    const now = new Date().toISOString();
+    let updated = false;
+    setState((prev) => ({
+      ...prev,
+      users: (prev.users ?? []).map((u) => {
+        if (u.email.toLowerCase() === cleanEmail && u.role !== Roles.Buyer) {
+          updated = true;
+          return { ...u, password: newPassword, updatedAt: now };
+        }
+        return u;
+      }),
+      currentUser:
+        prev.currentUser && prev.currentUser.email.toLowerCase() === cleanEmail
+          ? { ...prev.currentUser, password: newPassword, updatedAt: now }
+          : prev.currentUser,
+    }));
+    return updated;
+  }, []);
+
   const signOut = useCallback(() => {
     setState((prev) => ({ ...prev, currentUser: null }));
   }, []);
@@ -519,10 +589,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       if (!cleanEmail || !EMAIL_REGEX.test(cleanEmail)) {
         return { success: false, error: 'Please enter a valid email address.' };
       }
-      const isReservedAdminEmail = (state.users ?? []).some(
-        (u) => u.email.toLowerCase() === cleanEmail && u.role === Roles.Admin
+      const existingUserAccount = (state.users ?? []).find(
+        (u) => u.email.toLowerCase() === cleanEmail
       );
-      if (isReservedAdminEmail) {
+      if (existingUserAccount?.role === Roles.Admin) {
         return { success: false, error: 'This email address is reserved.' };
       }
       if (!input.password || input.password.length < 6) {
@@ -532,22 +602,25 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const existing = (state.buyers ?? []).find(
         (b) => b.email.toLowerCase() === cleanEmail
       );
-      if (existing) {
+      if (existing || existingUserAccount) {
         return {
           success: false,
           error: 'An account with this email address already exists. Please sign in.',
         };
       }
 
+      const now = new Date().toISOString();
       const newBuyer: BuyerAccount = {
         id: generateId('buy'),
         name: cleanName,
         email: cleanEmail,
         password: input.password,
         role: Roles.Buyer,
+        roleId: 3,
         storeId: input.storeId,
         storeName: input.storeName,
-        createdAt: new Date().toISOString(),
+        createdAt: now,
+        updatedAt: now,
       };
 
       setState((prev) => ({
@@ -557,7 +630,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       }));
       return { success: true, buyer: newBuyer };
     },
-    [state.buyers]
+    [state.buyers, state.users]
   );
 
   const buyerSignIn = useCallback(
@@ -632,11 +705,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         updatedAt: new Date().toISOString(),
       };
 
+      const now = new Date().toISOString();
       setState((prev) => {
         if (!prev.currentBuyer) return prev;
         const updatedBuyer: BuyerAccount = {
           ...prev.currentBuyer,
           savedCheckoutInfo: saved,
+          updatedAt: now,
         };
         return {
           ...prev,
@@ -651,11 +726,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const clearBuyerCheckoutInfo = useCallback(() => {
+    const now = new Date().toISOString();
     setState((prev) => {
       if (!prev.currentBuyer) return prev;
       const clearedBuyer: BuyerAccount = {
         ...prev.currentBuyer,
         savedCheckoutInfo: undefined,
+        updatedAt: now,
       };
       return {
         ...prev,
@@ -671,9 +748,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         Pick<User, 'name' | 'email' | 'plan' | 'planPeriodEndsAt' | 'cancelAtPeriodEnd'>
       >
     ) => {
+      const now = new Date().toISOString();
       setState((prev) => {
         if (!prev.currentUser) return prev;
-        const updatedUser: User = { ...prev.currentUser, ...updates };
+        const updatedUser: User = { ...prev.currentUser, ...updates, updatedAt: now };
         return {
           ...prev,
           currentUser: updatedUser,
@@ -702,6 +780,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       }
       if (!state.currentUser) {
         return { error: 'Please sign in first before creating a store.' };
+      }
+      if (input.name.trim().length < 2) {
+        return { error: 'Store name must be at least 2 characters.' };
       }
       const ownerId = state.currentUser.id;
       const ownerStoreCount = state.stores.filter((s) => s.ownerId === ownerId).length;
@@ -751,6 +832,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         branding: input.branding
           ? {
               ...input.branding,
+              backgroundMode: input.branding.backgroundMode ?? 'light',
+              buttonStyle: input.branding.buttonStyle ?? 'rounded',
+              fontPairing: input.branding.fontPairing ?? 'modern-sans',
+              heroCtaLabel: input.branding.heroCtaLabel ?? 'Shop Now',
               logoText: input.branding.logoText?.trim() ?? '',
             }
           : {
@@ -759,9 +844,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
               accentColor: templateMeta.defaultBranding.accentColor,
               surfaceColor: templateMeta.defaultBranding.surfaceColor,
               textColor: templateMeta.defaultBranding.textColor,
-              backgroundMode: templateMeta.defaultBranding.backgroundMode,
-              buttonStyle: templateMeta.defaultBranding.buttonStyle,
-              fontPairing: templateMeta.defaultBranding.fontPairing,
+              backgroundMode: templateMeta.defaultBranding.backgroundMode ?? 'light',
+              buttonStyle: templateMeta.defaultBranding.buttonStyle ?? 'rounded',
+              fontPairing: templateMeta.defaultBranding.fontPairing ?? 'modern-sans',
               logoText: '',
               heroTitle: '',
               heroSubtitle: '',
@@ -789,7 +874,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       return { store: newStore };
     },
-    [state.currentUser?.id, state.currentUser?.plan, state.stores]
+    [state.currentUser?.id, state.currentUser?.plan, state.currentUser?.role, state.currentUser?.status, state.stores]
   );
 
   const updateStoreMeta = useCallback(
@@ -805,6 +890,21 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const target = state.stores.find((s) => s.id === storeId);
       if (!target) {
         return { success: false, error: 'Store not found.' };
+      }
+
+      if (updates.name !== undefined && updates.name.trim().length < 2) {
+        return { success: false, error: 'Store name must be at least 2 characters.' };
+      }
+
+      if (
+        target.status === 'restricted' &&
+        updates.status === 'published' &&
+        state.currentUser?.role !== Roles.Admin
+      ) {
+        return {
+          success: false,
+          error: 'This store is restricted by platform admin and cannot be published.',
+        };
       }
 
       if (
@@ -901,48 +1001,78 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [state.products]
   );
 
-  const createProduct = useCallback((input: CreateProductInput): Product => {
-    const now = new Date().toISOString();
-    const discountType: DiscountType =
-      input.discountType ?? ((input.discountPercent ?? 0) > 0 ? 'percentage' : 'none');
-    const discountValue =
-      input.discountValue ?? (discountType === 'percentage' ? input.discountPercent ?? 0 : 0);
-    const smart = calculateSmartPricing({
-      basePrice: input.basePrice,
-      discountType,
-      discountValue,
-      costPrice: input.costPrice,
-    });
+  const createProduct = useCallback(
+    (input: CreateProductInput): Product => {
+      const now = new Date().toISOString();
+      const safeBasePrice = clampNonNegative(input.basePrice);
+      const safeCostPrice =
+        input.costPrice !== undefined ? clampNonNegative(input.costPrice) : undefined;
+      const discountType: DiscountType =
+        input.discountType ?? ((input.discountPercent ?? 0) > 0 ? 'percentage' : 'none');
+      const rawDiscountValue =
+        input.discountValue ?? (discountType === 'percentage' ? input.discountPercent ?? 0 : 0);
+      const discountValue =
+        discountType === 'percentage'
+          ? clampPercent(rawDiscountValue, 95)
+          : clampNonNegative(rawDiscountValue);
+      const smart = calculateSmartPricing({
+        basePrice: safeBasePrice,
+        discountType,
+        discountValue,
+        costPrice: safeCostPrice,
+      });
 
-    const product: Product = {
-      id: generateId('prd'),
-      storeId: input.storeId,
-      name: input.name.trim(),
-      description: input.description.trim(),
-      category: input.category.trim(),
-      basePrice: input.basePrice,
-      discountType,
-      discountValue,
-      discountPercent: Math.round(smart.effectiveDiscountPercent),
-      costPrice: input.costPrice,
-      finalPrice: smart.finalPrice,
-      sku: input.sku.trim(),
-      stock: input.stock,
-      imageUrl: input.imageUrl,
-      variants: input.variants ?? [],
-      isFeatured: input.isFeatured ?? false,
-      isAvailable: input.isAvailable ?? true,
-      createdAt: now,
-      updatedAt: now,
-    };
+      const storeSkus = new Set(
+        state.products
+          .filter((p) => p.storeId === input.storeId)
+          .map((p) => p.sku.trim().toLowerCase())
+      );
+      const baseSku =
+        input.sku.trim() || `SKU-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      let uniqueSku = baseSku;
+      let suffix = 2;
+      while (storeSkus.has(uniqueSku.toLowerCase())) {
+        uniqueSku = `${baseSku}-${suffix}`;
+        suffix += 1;
+      }
 
-    setState((prev) => ({
-      ...prev,
-      products: [product, ...prev.products],
-    }));
+      const normalizedVariants = (input.variants ?? []).map((v, idx) => ({
+        ...v,
+        stock: clampStock(v.stock),
+        sortOrder: v.sortOrder ?? idx,
+      }));
 
-    return product;
-  }, []);
+      const product: Product = {
+        id: generateId('prd'),
+        storeId: input.storeId,
+        name: input.name.trim(),
+        description: input.description.trim(),
+        category: input.category.trim() || 'General',
+        basePrice: safeBasePrice,
+        discountType,
+        discountValue,
+        discountPercent: clampPercent(Math.round(smart.effectiveDiscountPercent), 95),
+        costPrice: safeCostPrice,
+        finalPrice: clampNonNegative(smart.finalPrice),
+        sku: uniqueSku,
+        stock: clampStock(input.stock),
+        imageUrl: input.imageUrl,
+        variants: normalizedVariants,
+        isFeatured: input.isFeatured ?? false,
+        isAvailable: input.isAvailable ?? true,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      setState((prev) => ({
+        ...prev,
+        products: [product, ...prev.products],
+      }));
+
+      return product;
+    },
+    [state.products]
+  );
 
   const updateProduct = useCallback(
     (productId: string, updates: Partial<Omit<Product, 'id' | 'storeId'>>) => {
@@ -951,18 +1081,23 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         ...prev,
         products: prev.products.map((p) => {
           if (p.id !== productId) return p;
-          const nextBase = updates.basePrice ?? p.basePrice;
+          const nextBase = clampNonNegative(updates.basePrice ?? p.basePrice);
           const nextDiscountType: DiscountType =
             updates.discountType ??
             p.discountType ??
             ((updates.discountPercent ?? p.discountPercent) > 0 ? 'percentage' : 'none');
-          const nextDiscountValue =
+          const rawNextDiscountValue =
             updates.discountValue ??
             (updates.discountPercent !== undefined && nextDiscountType === 'percentage'
               ? updates.discountPercent
               : p.discountValue ?? p.discountPercent);
+          const nextDiscountValue =
+            nextDiscountType === 'percentage'
+              ? clampPercent(rawNextDiscountValue, 95)
+              : clampNonNegative(rawNextDiscountValue);
+          const rawCostPrice = 'costPrice' in updates ? updates.costPrice : p.costPrice;
           const nextCostPrice =
-            'costPrice' in updates ? updates.costPrice : p.costPrice;
+            rawCostPrice !== undefined ? clampNonNegative(rawCostPrice) : undefined;
 
           const smart = calculateSmartPricing({
             basePrice: nextBase,
@@ -971,15 +1106,34 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             costPrice: nextCostPrice,
           });
 
+          const nextSku =
+            updates.sku !== undefined && updates.sku.trim().length > 0
+              ? updates.sku.trim()
+              : p.sku;
+
+          const nextVariants = updates.variants
+            ? updates.variants.map((v, idx) => ({
+                ...v,
+                stock: clampStock(v.stock),
+                sortOrder: v.sortOrder ?? idx,
+              }))
+            : p.variants;
+
           return {
             ...p,
             ...updates,
+            name: updates.name !== undefined ? updates.name.trim() || p.name : p.name,
+            category:
+              updates.category !== undefined ? updates.category.trim() || 'General' : p.category,
+            sku: nextSku,
+            stock: updates.stock !== undefined ? clampStock(updates.stock) : p.stock,
+            variants: nextVariants,
             basePrice: nextBase,
             discountType: nextDiscountType,
             discountValue: nextDiscountValue,
-            discountPercent: Math.round(smart.effectiveDiscountPercent),
+            discountPercent: clampPercent(Math.round(smart.effectiveDiscountPercent), 95),
             costPrice: nextCostPrice,
-            finalPrice: smart.finalPrice,
+            finalPrice: clampNonNegative(smart.finalPrice),
             updatedAt: now,
           };
         }),
@@ -1006,16 +1160,26 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const now = new Date().toISOString();
       setState((prev) => {
         const current = prev.paymentSettingsByStore[storeId] ?? createDefaultPaymentSettings(storeId);
+        const merged: PaymentSettings = {
+          ...current,
+          ...updates,
+          storeId,
+          taxPercent: clampPercent(updates.taxPercent ?? current.taxPercent, 100),
+          serviceChargePercent: clampPercent(
+            updates.serviceChargePercent ?? current.serviceChargePercent ?? 0,
+            100
+          ),
+          shippingFee: clampNonNegative(updates.shippingFee ?? current.shippingFee),
+          freeShippingThreshold: clampNonNegative(
+            updates.freeShippingThreshold ?? current.freeShippingThreshold
+          ),
+          updatedAt: now,
+        };
         return {
           ...prev,
           paymentSettingsByStore: {
             ...prev.paymentSettingsByStore,
-            [storeId]: {
-              ...current,
-              ...updates,
-              storeId,
-              updatedAt: now,
-            },
+            [storeId]: merged,
           },
         };
       });
@@ -1032,33 +1196,129 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const placeCustomerOrder = useCallback(
     (input: Omit<CustomerOrder, 'id' | 'status' | 'createdAt'>): CustomerOrder => {
       const orderNum = Math.floor(1050 + Math.random() * 8900);
+      const nowIso = new Date().toISOString();
       const storeObj = state.stores.find((s) => s.id === input.storeId);
+      const storeCheckout =
+        state.paymentSettingsByStore[input.storeId] ?? createDefaultPaymentSettings(input.storeId);
+      const methodKey = derivePaymentMethodKey(input.paymentMethodKey, input.paymentMethod);
+      const initialPaymentStatus = deriveOrderPaymentStatus(methodKey, input.paymentStatus);
+      const normalizedItems = input.items.map((item) => ({
+        ...item,
+        lineTotal:
+          item.lineTotal ?? Math.round(clampNonNegative(item.unitPrice) * item.quantity * 100) / 100,
+      }));
+
       const newOrder: CustomerOrder = {
         ...input,
         id: `ORD-${orderNum}`,
         storeName: storeObj?.name ?? 'Store',
         buyerId: state.currentBuyer?.id,
-        phoneNumber: input.phoneNumber,
+        phoneNumber: input.phoneNumber.trim(),
         customerName: input.customerName.trim() || state.currentBuyer?.name || 'Customer',
+        deliveryAddress: input.deliveryAddress.trim(),
+        currency: input.currency ?? storeCheckout.currency ?? 'PHP',
+        paymentMethodKey: methodKey,
+        paymentStatus: initialPaymentStatus,
+        amountPaid: initialPaymentStatus === 'paid' ? input.grandTotal : 0,
+        paymentReferenceNumber: input.paymentReferenceNumber?.trim() || undefined,
+        items: normalizedItems,
         status: 'Pending',
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso,
+        updatedAt: nowIso,
       };
-      setState((prev) => ({
-        ...prev,
-        placedOrders: [newOrder, ...(prev.placedOrders ?? [])],
-      }));
+
+      setState((prev) => {
+        const qtyByProduct = new Map<string, number>();
+        const qtyByVariantKey = new Map<string, number>();
+
+        normalizedItems.forEach((item) => {
+          qtyByProduct.set(
+            item.productId,
+            (qtyByProduct.get(item.productId) ?? 0) + item.quantity
+          );
+          if (item.variantId) {
+            qtyByVariantKey.set(
+              `${item.productId}::id::${item.variantId}`,
+              (qtyByVariantKey.get(`${item.productId}::id::${item.variantId}`) ?? 0) +
+                item.quantity
+            );
+          } else if (item.variant) {
+            qtyByVariantKey.set(
+              `${item.productId}::label::${item.variant}`,
+              (qtyByVariantKey.get(`${item.productId}::label::${item.variant}`) ?? 0) +
+                item.quantity
+            );
+          }
+        });
+
+        const nextProducts = prev.products.map((product) => {
+          const orderedQty = qtyByProduct.get(product.id);
+          if (!orderedQty) return product;
+          const nextStock = Math.max(0, product.stock - orderedQty);
+          const nextVariants = product.variants.map((variant) => {
+            const vQty =
+              qtyByVariantKey.get(`${product.id}::id::${variant.id}`) ??
+              qtyByVariantKey.get(`${product.id}::label::${variant.label}`) ??
+              0;
+            if (!vQty) return variant;
+            return {
+              ...variant,
+              stock: Math.max(0, variant.stock - vQty),
+            };
+          });
+          return {
+            ...product,
+            stock: nextStock,
+            variants: nextVariants,
+            updatedAt: nowIso,
+          };
+        });
+
+        return {
+          ...prev,
+          products: nextProducts,
+          placedOrders: [newOrder, ...(prev.placedOrders ?? [])],
+        };
+      });
       return newOrder;
     },
-    [state.currentBuyer, state.stores]
+    [state.currentBuyer, state.paymentSettingsByStore, state.stores]
   );
 
   const updateOrderStatus = useCallback(
     (orderId: string, status: OrderFulfillmentStatus) => {
+      const nowIso = new Date().toISOString();
       setState((prev) => ({
         ...prev,
         placedOrders: (prev.placedOrders ?? []).map((o) =>
-          o.id === orderId ? { ...o, status } : o
+          o.id === orderId ? { ...o, status, updatedAt: nowIso } : o
         ),
+      }));
+    },
+    []
+  );
+
+  const updateOrderPaymentStatus = useCallback(
+    (orderId: string, paymentStatus: OrderPaymentStatus, verifiedBy?: string) => {
+      const nowIso = new Date().toISOString();
+      setState((prev) => ({
+        ...prev,
+        placedOrders: (prev.placedOrders ?? []).map((o) => {
+          if (o.id !== orderId) return o;
+          return {
+            ...o,
+            paymentStatus,
+            amountPaid:
+              paymentStatus === 'paid'
+                ? o.grandTotal
+                : paymentStatus === 'refunded'
+                  ? o.amountPaid ?? o.grandTotal
+                  : 0,
+            paidAt: paymentStatus === 'paid' ? o.paidAt ?? nowIso : o.paidAt,
+            verifiedBy: verifiedBy ?? prev.currentUser?.id ?? o.verifiedBy,
+            updatedAt: nowIso,
+          };
+        }),
       }));
     },
     []
@@ -1074,10 +1334,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       paymentMethod: string;
       referenceId?: string;
       status?: SubscriptionTransaction['status'];
+      dueDate?: string;
       proofUrl?: string;
     }) => {
       const nextStatus = input.status ?? 'paid';
       const nowIso = new Date().toISOString();
+      const nextPeriodEndIso = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
       const tx: SubscriptionTransaction = {
         id: generateId('tx_sub'),
         referenceId: input.referenceId ?? `SUB-${Date.now().toString().slice(-6)}`,
@@ -1085,12 +1347,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         userName: input.userName,
         userEmail: input.userEmail,
         planId: input.planId,
-        amount: input.amount,
+        amount: clampNonNegative(input.amount),
         paymentMethod: input.paymentMethod,
         status: nextStatus,
+        dueDate: input.dueDate ?? (nextStatus === 'dues' ? nowIso : undefined),
+        periodStart: nextStatus === 'paid' ? nowIso : undefined,
+        periodEnd: nextStatus === 'paid' ? nextPeriodEndIso : undefined,
         proofUrl: input.proofUrl,
         approvedAt: nextStatus === 'paid' ? nowIso : undefined,
         createdAt: nowIso,
+        updatedAt: nowIso,
       };
       setState((prev) => ({
         ...prev,
@@ -1222,13 +1488,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     (txId: string, status: SubscriptionTransaction['status']) => {
       setState((prev) => {
         const nowIso = new Date().toISOString();
+        const nextPeriodEndIso = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
         const targetTx = (prev.subscriptionTransactions ?? []).find((t) => t.id === txId);
         const nextTransactions = (prev.subscriptionTransactions ?? []).map((tx) =>
           tx.id === txId
             ? {
                 ...tx,
                 status,
+                periodStart: status === 'paid' ? tx.periodStart ?? nowIso : tx.periodStart,
+                periodEnd: status === 'paid' ? nextPeriodEndIso : tx.periodEnd,
+                approvedBy:
+                  status === 'paid' ? prev.currentUser?.id ?? tx.approvedBy : tx.approvedBy,
                 approvedAt: status === 'paid' ? nowIso : tx.approvedAt,
+                updatedAt: nowIso,
               }
             : tx
         );
@@ -1239,8 +1511,6 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             subscriptionTransactions: nextTransactions,
           };
         }
-
-        const nextPeriodEndIso = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
         const matchesTxUser = (u: User) =>
           u.id === targetTx.userId ||
           u.email.toLowerCase() === targetTx.userEmail.toLowerCase();
@@ -1350,7 +1620,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     setState((prev) => ({
       ...prev,
       platformPaymentSettings: {
-        channels: channels.map((channel) => ({ ...channel })),
+        channels: channels.map((channel, index) => ({
+          ...channel,
+          sortOrder: channel.sortOrder ?? index,
+        })),
         updatedAt: nowIso,
       },
     }));
@@ -1368,6 +1641,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       signInUser,
       signUpUser,
       signInAdminUser,
+      resetUserPassword,
       signOut,
       updateUserProfile,
       buyerSignUp,
@@ -1393,6 +1667,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       getStoreOrders,
       placeCustomerOrder,
       updateOrderStatus,
+      updateOrderPaymentStatus,
       recordSubscriptionPayment,
       adminUpdateUser,
       adminDeleteUser,
@@ -1415,6 +1690,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       signInUser,
       signUpUser,
       signInAdminUser,
+      resetUserPassword,
       signOut,
       updateUserProfile,
       buyerSignUp,
@@ -1440,6 +1716,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       getStoreOrders,
       placeCustomerOrder,
       updateOrderStatus,
+      updateOrderPaymentStatus,
       recordSubscriptionPayment,
       adminUpdateUser,
       adminDeleteUser,

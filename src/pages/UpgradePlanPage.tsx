@@ -333,6 +333,7 @@ export function UpgradePlanPage() {
         paymentMethod: activeChannel.label,
         referenceId,
         status: 'pending',
+        dueDate: isRenewalDue ? resolvedPeriodEndsAt : undefined,
         proofUrl: proofUrl || undefined,
       });
     }

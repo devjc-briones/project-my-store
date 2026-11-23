@@ -1,9 +1,13 @@
 import {
+  CurrencyCode,
   CustomerOrder,
   OrderFulfillmentStatus,
   OrderItemSummary,
+  OrderPaymentStatus,
+  PreferredCheckoutPaymentKey,
   Product,
 } from '../types/schema';
+import { deriveOrderPaymentStatus, derivePaymentMethodKey } from './supabaseMappers';
 
 export interface UnifiedOrderRow {
   id: string;
@@ -11,11 +15,17 @@ export interface UnifiedOrderRow {
   phoneNumber: string;
   deliveryAddress: string;
   notes?: string;
+  currency: CurrencyCode;
   itemsCount: number;
   itemsSummary: string;
   items: OrderItemSummary[];
+  paymentMethodKey: PreferredCheckoutPaymentKey;
   paymentMethod: string;
+  paymentStatus: OrderPaymentStatus;
+  amountPaid: number;
+  paymentReferenceNumber?: string;
   paymentProofUrl?: string;
+  paidAt?: string;
   subtotal: number;
   deliveryFee: number;
   taxAmount: number;
@@ -31,33 +41,43 @@ export function getCombinedStoreOrders(
   _products: Product[],
   liveOrders: CustomerOrder[]
 ): UnifiedOrderRow[] {
-  const mappedLive: UnifiedOrderRow[] = liveOrders.map((o) => ({
-    id: o.id,
-    customer: o.customerName,
-    phoneNumber: o.phoneNumber,
-    deliveryAddress: o.deliveryAddress,
-    notes: o.notes,
-    itemsCount: o.items.reduce((sum, item) => sum + item.quantity, 0),
-    itemsSummary: o.items
-      .map((i) => `${i.quantity}× ${i.name}${i.variant ? ` (${i.variant})` : ''}`)
-      .join(', '),
-    items: o.items,
-    paymentMethod: o.paymentMethod,
-    paymentProofUrl: o.paymentProofUrl,
-    subtotal: o.subtotal,
-    deliveryFee: o.deliveryFee,
-    taxAmount: o.taxAmount,
-    serviceChargeAmount: o.serviceChargeAmount,
-    total: o.grandTotal,
-    placedAt: new Date(o.createdAt).toLocaleString([], {
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-    }),
-    status: o.status,
-    isLivePlaced: true,
-  }));
+  const mappedLive: UnifiedOrderRow[] = liveOrders.map((o) => {
+    const methodKey = derivePaymentMethodKey(o.paymentMethodKey, o.paymentMethod);
+    const paymentStatus = deriveOrderPaymentStatus(methodKey, o.paymentStatus);
+    return {
+      id: o.id,
+      customer: o.customerName,
+      phoneNumber: o.phoneNumber,
+      deliveryAddress: o.deliveryAddress,
+      notes: o.notes,
+      currency: o.currency ?? 'PHP',
+      itemsCount: o.items.reduce((sum, item) => sum + item.quantity, 0),
+      itemsSummary: o.items
+        .map((i) => `${i.quantity}× ${i.name}${i.variant ? ` (${i.variant})` : ''}`)
+        .join(', '),
+      items: o.items,
+      paymentMethodKey: methodKey,
+      paymentMethod: o.paymentMethod,
+      paymentStatus,
+      amountPaid: o.amountPaid ?? (paymentStatus === 'paid' ? o.grandTotal : 0),
+      paymentReferenceNumber: o.paymentReferenceNumber,
+      paymentProofUrl: o.paymentProofUrl,
+      paidAt: o.paidAt,
+      subtotal: o.subtotal,
+      deliveryFee: o.deliveryFee,
+      taxAmount: o.taxAmount,
+      serviceChargeAmount: o.serviceChargeAmount,
+      total: o.grandTotal,
+      placedAt: new Date(o.createdAt).toLocaleString([], {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      }),
+      status: o.status,
+      isLivePlaced: true,
+    };
+  });
 
   const seenLiveIds = new Set<string>();
   return mappedLive.filter((o) => {

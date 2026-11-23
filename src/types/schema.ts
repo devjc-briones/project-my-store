@@ -19,6 +19,14 @@ export enum Roles {
   Buyer = 'buyer',
 }
 
+export type RoleId = 1 | 2 | 3;
+
+export const ROLE_TO_ID: Record<Roles, RoleId> = {
+  [Roles.Admin]: 1,
+  [Roles.Seller]: 2,
+  [Roles.Buyer]: 3,
+};
+
 export type UserRole = Roles;
 
 export type FontPairingId =
@@ -34,20 +42,32 @@ export type ButtonStyle = 'rounded' | 'pill' | 'sharp';
 
 export type CurrencyCode = 'PHP' | 'USD' | 'SGD' | 'EUR';
 
+export type PreferredCheckoutPaymentKey = 'gcash' | 'maya' | 'bank' | 'cod';
+
+export type OrderPaymentStatus = 'unpaid' | 'pending_verification' | 'paid' | 'refunded';
+
 export interface User {
   id: string;
   name: string;
   email: string;
   password?: string;
   role?: Roles;
+  roleId?: RoleId;
   avatarUrl?: string;
   plan: 'starter' | 'pro';
   status?: UserStatus;
   restrictedReason?: string;
   planPeriodEndsAt?: string;
   cancelAtPeriodEnd?: boolean;
+  phoneNumber?: string;
+  address?: string;
+  deliveryNotes?: string;
+  preferredPaymentMethod?: PreferredCheckoutPaymentKey;
+  checkoutInfoUpdatedAt?: string;
+  registeredStoreId?: string;
   lastActiveAt?: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface SubscriptionTransaction {
@@ -60,12 +80,15 @@ export interface SubscriptionTransaction {
   amount: number;
   paymentMethod: string;
   status: 'pending' | 'dues' | 'paid' | 'refunded';
+  dueDate?: string;
+  periodStart?: string;
+  periodEnd?: string;
   proofUrl?: string;
+  approvedBy?: string;
   approvedAt?: string;
   createdAt: string;
+  updatedAt?: string;
 }
-
-export type PreferredCheckoutPaymentKey = 'gcash' | 'maya' | 'bank' | 'cod';
 
 export interface BuyerCheckoutInfo {
   fullName: string;
@@ -82,7 +105,9 @@ export interface BuyerAccount {
   email: string;
   password: string;
   role: Roles;
+  roleId?: RoleId;
   createdAt: string;
+  updatedAt?: string;
   storeId?: string;
   storeName?: string;
   savedCheckoutInfo?: BuyerCheckoutInfo;
@@ -142,6 +167,7 @@ export interface ProductVariant {
   priceDelta: number;
   stock: number;
   sku?: string;
+  sortOrder?: number;
 }
 
 export type DiscountType = 'none' | 'percentage' | 'fixed';
@@ -225,10 +251,12 @@ export interface IndustryTemplateMeta {
 
 export interface OrderItemSummary {
   productId: string;
+  variantId?: string;
   name: string;
   variant?: string;
   quantity: number;
   unitPrice: number;
+  lineTotal?: number;
 }
 
 export type OrderFulfillmentStatus =
@@ -246,8 +274,15 @@ export interface CustomerOrder {
   phoneNumber: string;
   deliveryAddress: string;
   notes?: string;
+  currency?: CurrencyCode;
+  paymentMethodKey?: PreferredCheckoutPaymentKey;
   paymentMethod: string;
+  paymentStatus?: OrderPaymentStatus;
+  amountPaid?: number;
+  paymentReferenceNumber?: string;
   paymentProofUrl?: string;
+  paidAt?: string;
+  verifiedBy?: string;
   items: OrderItemSummary[];
   subtotal: number;
   deliveryFee: number;
@@ -256,6 +291,7 @@ export interface CustomerOrder {
   grandTotal: number;
   status: OrderFulfillmentStatus;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export type PlatformPaymentChannelType = 'ewallet' | 'bank' | 'custom';
@@ -272,11 +308,33 @@ export interface PlatformPaymentChannel {
   accountNumber: string;
   note?: string;
   qrImageUrl?: string;
+  sortOrder?: number;
 }
 
 export interface PlatformPaymentSettings {
   channels: PlatformPaymentChannel[];
   updatedAt: string;
+}
+
+export type NotificationCategory = 'order' | 'stock' | 'alert' | 'billing';
+
+export interface AppNotification {
+  id: string;
+  userId: string;
+  storeId?: string;
+  orderId?: string;
+  subscriptionId?: string;
+  notificationKey?: string;
+  category: NotificationCategory;
+  title: string;
+  message: string;
+  targetPath: string;
+  isRead: boolean;
+  readAt?: string;
+  isDismissed: boolean;
+  dismissedAt?: string;
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export interface GlobalAppState {
@@ -290,6 +348,7 @@ export interface GlobalAppState {
   platformPaymentSettings?: PlatformPaymentSettings;
   placedOrders?: CustomerOrder[];
   subscriptionTransactions?: SubscriptionTransaction[];
+  notifications?: AppNotification[];
   readNotificationIds?: string[];
   dismissedNotificationIds?: string[];
   activeStoreId: string | null;

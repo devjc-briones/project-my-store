@@ -1,7 +1,14 @@
 import { useMemo, useState } from 'react';
 import { Search, Store as StoreIcon, UserCheck } from 'lucide-react';
-import { BuyerAccount, CustomerOrder, OrderFulfillmentStatus, Roles } from '../../types/schema';
+import {
+  BuyerAccount,
+  CustomerOrder,
+  OrderFulfillmentStatus,
+  OrderPaymentStatus,
+  Roles,
+} from '../../types/schema';
 import { formatCurrency } from '../../utils/pricing';
+import { deriveOrderPaymentStatus, derivePaymentMethodKey } from '../../utils/supabaseMappers';
 import {
   DEFAULT_TABLE_PAGE_SIZE,
   TablePagination,
@@ -12,6 +19,7 @@ interface AdminOrdersBuyersTabProps {
   orders: CustomerOrder[];
   buyers: BuyerAccount[];
   onUpdateOrderStatus: (orderId: string, status: OrderFulfillmentStatus) => void;
+  onUpdateOrderPaymentStatus?: (orderId: string, paymentStatus: OrderPaymentStatus) => void;
   onDeleteBuyer?: (buyerId: string) => void;
 }
 
@@ -32,6 +40,7 @@ export function AdminOrdersBuyersTab({
   orders,
   buyers,
   onUpdateOrderStatus,
+  onUpdateOrderPaymentStatus,
 }: AdminOrdersBuyersTabProps) {
   const [search, setSearch] = useState('');
 
@@ -108,42 +117,91 @@ export function AdminOrdersBuyersTab({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {ordersPagination.paginatedItems.map((order) => (
-                  <tr key={order.id} className="hover:bg-slate-50/60">
-                    <td className="py-3 px-4 font-mono text-xs font-semibold text-slate-900 whitespace-nowrap">
-                      {order.id}
-                    </td>
-                    <td className="py-3 px-4 text-xs font-semibold text-slate-700 whitespace-nowrap">
-                      {order.storeName ?? order.storeId}
-                    </td>
-                    <td className="py-3 px-4">
-                      <p className="text-xs font-semibold text-slate-900">{order.customerName}</p>
-                      <p className="text-[11px] font-mono text-slate-500">{order.phoneNumber}</p>
-                    </td>
-                    <td className="py-3 px-4 text-xs text-slate-600 whitespace-nowrap">
-                      {order.paymentMethod}
-                    </td>
-                    <td className="py-3 px-4 text-right font-mono font-semibold tabular-nums text-slate-900 whitespace-nowrap">
-                      {formatCurrency(order.grandTotal, 'PHP')}
-                    </td>
-                    <td className="py-3 px-4 text-right whitespace-nowrap">
-                      <select
-                        aria-label={`Order status for ${order.id}`}
-                        value={order.status}
-                        onChange={(e) =>
-                          onUpdateOrderStatus(order.id, e.target.value as OrderFulfillmentStatus)
-                        }
-                        className="px-2.5 py-1.5 text-xs font-semibold bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900 cursor-pointer"
-                      >
-                        {ORDER_STATUSES.map((st) => (
-                          <option key={st} value={st}>
-                            {st}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                  </tr>
-                ))}
+                {ordersPagination.paginatedItems.map((order) => {
+                  const methodKey = derivePaymentMethodKey(
+                    order.paymentMethodKey,
+                    order.paymentMethod
+                  );
+                  const paymentStatus = deriveOrderPaymentStatus(
+                    methodKey,
+                    order.paymentStatus
+                  );
+                  return (
+                    <tr key={order.id} className="hover:bg-slate-50/60">
+                      <td className="py-3 px-4 font-mono text-xs font-semibold text-slate-900 whitespace-nowrap">
+                        {order.id}
+                      </td>
+                      <td className="py-3 px-4 text-xs font-semibold text-slate-700 whitespace-nowrap">
+                        {order.storeName ?? order.storeId}
+                      </td>
+                      <td className="py-3 px-4">
+                        <p className="text-xs font-semibold text-slate-900">{order.customerName}</p>
+                        <p className="text-[11px] font-mono text-slate-500">{order.phoneNumber}</p>
+                      </td>
+                      <td className="py-3 px-4 text-xs text-slate-600 whitespace-nowrap">
+                        <div className="space-y-1">
+                          <div>
+                            <span>{order.paymentMethod}</span>
+                            {order.paymentReferenceNumber && (
+                              <span className="ml-1.5 font-mono text-[10px] text-slate-400">
+                                #{order.paymentReferenceNumber}
+                              </span>
+                            )}
+                          </div>
+                          {onUpdateOrderPaymentStatus ? (
+                            <select
+                              aria-label={`Payment status for ${order.id}`}
+                              value={paymentStatus}
+                              onChange={(e) =>
+                                onUpdateOrderPaymentStatus(
+                                  order.id,
+                                  e.target.value as OrderPaymentStatus
+                                )
+                              }
+                              className={`px-2 py-0.5 text-[11px] font-semibold border rounded-md focus:outline-none focus:ring-2 focus:ring-slate-900 cursor-pointer ${
+                                paymentStatus === 'paid'
+                                  ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                                  : paymentStatus === 'pending_verification'
+                                    ? 'bg-amber-50 border-amber-200 text-amber-700'
+                                    : paymentStatus === 'refunded'
+                                      ? 'bg-rose-50 border-rose-200 text-rose-700'
+                                      : 'bg-slate-50 border-slate-200 text-slate-700'
+                              }`}
+                            >
+                              <option value="unpaid">Unpaid</option>
+                              <option value="pending_verification">Pending Verification</option>
+                              <option value="paid">Paid</option>
+                              <option value="refunded">Refunded</option>
+                            </select>
+                          ) : (
+                            <span className="inline-block text-[11px] font-semibold capitalize text-slate-500">
+                              {paymentStatus.replace('_', ' ')}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4 text-right font-mono font-semibold tabular-nums text-slate-900 whitespace-nowrap">
+                        {formatCurrency(order.grandTotal, order.currency ?? 'PHP')}
+                      </td>
+                      <td className="py-3 px-4 text-right whitespace-nowrap">
+                        <select
+                          aria-label={`Order status for ${order.id}`}
+                          value={order.status}
+                          onChange={(e) =>
+                            onUpdateOrderStatus(order.id, e.target.value as OrderFulfillmentStatus)
+                          }
+                          className="px-2.5 py-1.5 text-xs font-semibold bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900 cursor-pointer"
+                        >
+                          {ORDER_STATUSES.map((st) => (
+                            <option key={st} value={st}>
+                              {st}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

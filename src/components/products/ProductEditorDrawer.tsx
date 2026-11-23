@@ -309,20 +309,30 @@ export function ProductEditorDrawer({
 
     const cleanedVariants = variants
       .filter((v) => v.label.trim().length > 0)
-      .map((v) => ({
+      .map((v, idx) => ({
         ...v,
         label: v.label.trim(),
         value: v.label.trim(),
         attributeName: v.attributeName.trim() || 'Option',
+        priceDelta: Number.isFinite(v.priceDelta) ? v.priceDelta : 0,
+        stock: Math.max(0, Math.floor(Number.isFinite(v.stock) ? v.stock : 0)),
+        sortOrder: idx,
       }));
+
+    const clampedDiscountValue =
+      discountType === 'none'
+        ? 0
+        : discountType === 'percentage'
+          ? Math.min(95, Math.max(0, numericDiscount))
+          : Math.min(numericBase, Math.max(0, numericDiscount));
 
     onSave({
       name: name.trim(),
       description: description.trim() || `${name.trim()} — ${category.trim()}`,
       category: category.trim() || recommendedCategories[0] || 'General',
-      basePrice: numericBase,
+      basePrice: Math.max(0, numericBase),
       discountType,
-      discountValue: discountType === 'none' ? 0 : numericDiscount,
+      discountValue: clampedDiscountValue,
       costPrice: validCost,
       sku: sku.trim() || generateSku(name),
       stock: Math.max(0, parseInt(stock, 10) || 0),

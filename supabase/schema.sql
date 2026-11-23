@@ -354,41 +354,35 @@ create table if not exists public.platform_payment_channels (
   updated_at timestamptz not null default now()
 );
 
--- Seed default platform payment channels matching src/data/platformPayments.ts
-insert into public.platform_payment_channels (
-  id, channel_type, label, subtitle, is_enabled, requires_receipt,
-  account_name, number_label, account_number, note, sort_order
-) values
-  (
-    'gcash', 'ewallet', 'GCash', 'Scan QR or send via e-wallet', true, true,
-    'mystore Platform Billing', 'GCash Number', '0917 888 2410',
-    'Scan the QR code or send exact amount, then upload your receipt.', 1
-  ),
-  (
-    'maya', 'ewallet', 'Maya', 'Instant Maya QR transfer', true, true,
-    'mystore Platform Billing', 'Maya Number', '0918 555 9034',
-    'Send exact subscription amount and attach payment screenshot.', 2
-  ),
-  (
-    'bank', 'bank', 'Bank Transfer', 'UnionBank / InstaPay / PESONet', true, true,
-    'mystore Technologies Inc.', 'UnionBank Account Number', '1094 2201 7745',
-    'Bank: UnionBank of the Philippines · Instant InstaPay transfer.', 3
-  )
-on conflict (id) do nothing;
+-- Platform billing channels start empty; Admin configures them via Admin -> Payment Setting
 
 create table if not exists public.notifications (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(id) on delete cascade,
   store_id uuid references public.stores(id) on delete cascade,
-  type text not null default 'info',
+  order_id uuid references public.buyer_orders(id) on delete cascade,
+  subscription_id uuid references public.subscriptions(id) on delete cascade,
+  notification_key text,
+  category text not null default 'alert' check (
+    category in ('order', 'stock', 'alert', 'billing')
+  ),
   title text not null,
   message text not null,
+  target_path text not null default '/dashboard',
   is_read boolean not null default false,
+  read_at timestamptz,
   is_dismissed boolean not null default false,
-  created_at timestamptz not null default now()
+  dismissed_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
 
-create index if not exists idx_notifications_user_unread on public.notifications(user_id, is_dismissed, is_read, created_at desc);
+create unique index if not exists idx_notifications_user_key
+  on public.notifications(user_id, notification_key)
+  where notification_key is not null;
+
+create index if not exists idx_notifications_user_feed
+  on public.notifications(user_id, is_dismissed, is_read, created_at desc);
 
 -- Tracks read/dismissed keys for derived dashboard notifications (matches DashboardHeader.tsx)
 create table if not exists public.user_notification_states (
@@ -440,6 +434,9 @@ create trigger trg_subscriptions_updated_at before update on public.subscription
 
 drop trigger if exists trg_platform_channels_updated_at on public.platform_payment_channels;
 create trigger trg_platform_channels_updated_at before update on public.platform_payment_channels for each row execute function public.set_updated_at();
+
+drop trigger if exists trg_notifications_updated_at on public.notifications;
+create trigger trg_notifications_updated_at before update on public.notifications for each row execute function public.set_updated_at();
 
 drop trigger if exists trg_user_notification_states_updated_at on public.user_notification_states;
 create trigger trg_user_notification_states_updated_at before update on public.user_notification_states for each row execute function public.set_updated_at();
@@ -584,7 +581,7 @@ begin
   on conflict (store_id) do nothing;
 
   insert into public.store_payments_settings (store_id, method_key, is_enabled) values
-    (new.id, 'cod', true),
+    (new.id, 'cod', false),
     (new.id, 'gcash', false),
     (new.id, 'maya', false),
     (new.id, 'bank', false)
@@ -734,6 +731,200 @@ drop trigger if exists trg_subscription_status_sync on public.subscriptions;
 create trigger trg_subscription_status_sync
   before insert or update on public.subscriptions
   for each row execute function public.handle_subscription_status_sync();
+
+-- Trigger 6A: Notify store owner when a new buyer order is placed
+create or replace function public.notify_on_new_order()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_owner_id uuid;
+  v_store_name text;
+begin
+  select user_id, name into v_owner_id, v_store_name
+  from public.stores
+  where id = new.store_id;
+
+  if v_owner_id is not null then
+    insert into public.notifications (
+      user_id, store_id, order_id, notification_key, category, title, message, target_path
+    ) values (
+      v_owner_id,
+      new.store_id,
+      new.id,
+      'order_' || new.id::text,
+      'order',
+      coalesce(v_store_name, 'Shop') || ' received a new order (' || new.order_code || ')',
+      'Order from ' || new.customer_name || ' · Total ' || new.currency || ' ' || to_char(new.grand_total, 'FM999,999,990.00'),
+      '/store/' || new.store_id::text || '/products?tab=orders'
+    )
+    on conflict (user_id, notification_key) where notification_key is not null do nothing;
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_notify_new_order on public.buyer_orders;
+create trigger trg_notify_new_order
+  after insert on public.buyer_orders
+  for each row execute function public.notify_on_new_order();
+
+-- Trigger 6B: Notify store owner when product stock hits low (<= 5) or out-of-stock (0)
+create or replace function public.notify_on_low_stock()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_owner_id uuid;
+  v_store_name text;
+begin
+  if new.is_available = true and new.stock <= 5
+    and (tg_op = 'INSERT' or old.stock is distinct from new.stock)
+  then
+    select user_id, name into v_owner_id, v_store_name
+    from public.stores
+    where id = new.store_id;
+
+    if v_owner_id is not null then
+      insert into public.notifications (
+        user_id, store_id, notification_key, category, title, message, target_path
+      ) values (
+        v_owner_id,
+        new.store_id,
+        'stock_' || new.id::text || '_' || new.stock::text,
+        'stock',
+        case when new.stock <= 0 then 'Out of stock: ' || new.name else 'Low stock: ' || new.name end,
+        case when new.stock <= 0
+          then '0 units left in ' || coalesce(v_store_name, 'Store')
+          else 'Only ' || new.stock::text || ' left in ' || coalesce(v_store_name, 'Store')
+        end,
+        '/store/' || new.store_id::text || '/products?tab=products'
+      )
+      on conflict (user_id, notification_key) where notification_key is not null do nothing;
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_notify_low_stock on public.store_products;
+create trigger trg_notify_low_stock
+  after insert or update on public.store_products
+  for each row execute function public.notify_on_low_stock();
+
+-- Trigger 6C: Notify user when a subscription payment is pending, approved, due, or refunded
+create or replace function public.notify_on_subscription_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_title text;
+  v_message text;
+begin
+  if tg_op = 'UPDATE' and old.status is not distinct from new.status then
+    return new;
+  end if;
+
+  if new.status = 'pending' then
+    v_title := 'Payment pending approval';
+    v_message := 'PHP ' || to_char(new.amount, 'FM999,999,990.00') || ' via ' || new.payment_method || ' (' || new.reference_id || ') · Awaiting admin approval';
+  elsif new.status = 'paid' then
+    v_title := 'Payment completed';
+    v_message := initcap(new.plan_id) || ' plan (PHP ' || to_char(new.amount, 'FM999,999,990.00') || ') approved via ' || new.payment_method;
+  elsif new.status = 'refunded' then
+    v_title := 'Subscription refunded';
+    v_message := 'PHP ' || to_char(new.amount, 'FM999,999,990.00') || ' via ' || new.payment_method;
+  else
+    v_title := 'Subscription payment due';
+    v_message := 'Your ' || initcap(new.plan_id) || ' plan payment (' || new.reference_id || ') is due. Settle to keep active stores open.';
+  end if;
+
+  insert into public.notifications (
+    user_id, subscription_id, notification_key, category, title, message, target_path
+  ) values (
+    new.user_id,
+    new.id,
+    'sub_' || new.id::text || '_' || new.status,
+    'billing',
+    v_title,
+    v_message,
+    '/upgrade-plan'
+  )
+  on conflict (user_id, notification_key) where notification_key is not null do nothing;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_notify_subscription_change on public.subscriptions;
+create trigger trg_notify_subscription_change
+  after insert or update on public.subscriptions
+  for each row execute function public.notify_on_subscription_change();
+
+-- Trigger 6D: Notify user when their account or store is restricted by admin
+create or replace function public.notify_on_moderation_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if tg_table_name = 'users' then
+    if new.status = 'restricted' and coalesce(old.status, 'active') <> 'restricted'
+      and coalesce(new.restricted_reason, '') not like '%Subscription billing%'
+    then
+      insert into public.notifications (
+        user_id, notification_key, category, title, message, target_path
+      ) values (
+        new.id,
+        'acct_restricted_' || new.id::text || '_' || md5(coalesce(new.restricted_reason, 'default')),
+        'alert',
+        'Account restricted',
+        coalesce(nullif(trim(new.restricted_reason), ''), 'Your merchant account is under review by platform admin.'),
+        '/dashboard'
+      )
+      on conflict (user_id, notification_key) where notification_key is not null do nothing;
+    end if;
+  elsif tg_table_name = 'stores' then
+    if new.status = 'restricted' and coalesce(old.status, 'draft') <> 'restricted'
+      and coalesce(new.restricted_reason, '') not like '%Subscription billing%'
+    then
+      insert into public.notifications (
+        user_id, store_id, notification_key, category, title, message, target_path
+      ) values (
+        new.user_id,
+        new.id,
+        'store_restricted_' || new.id::text || '_' || md5(coalesce(new.restricted_reason, 'default')),
+        'alert',
+        'Store restricted: ' || new.name,
+        coalesce(nullif(trim(new.restricted_reason), ''), 'This storefront has been restricted by platform admin.'),
+        '/store/' || new.id::text
+      )
+      on conflict (user_id, notification_key) where notification_key is not null do nothing;
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_notify_user_moderation on public.users;
+create trigger trg_notify_user_moderation
+  after update on public.users
+  for each row execute function public.notify_on_moderation_change();
+
+drop trigger if exists trg_notify_store_moderation on public.stores;
+create trigger trg_notify_store_moderation
+  after update on public.stores
+  for each row execute function public.notify_on_moderation_change();
 
 -- RPC 1: Atomic Storefront Checkout (Supports both Authenticated Buyers AND Guests)
 create or replace function public.place_storefront_order(
@@ -1005,8 +1196,64 @@ as $$
   limit 1;
 $$;
 
+-- RPC 3: Mark notifications as read for current user
+create or replace function public.mark_notifications_read(p_notification_ids uuid[] default null)
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_updated integer;
+begin
+  if auth.uid() is null then
+    raise exception 'Authentication required.';
+  end if;
+
+  update public.notifications
+  set is_read = true, read_at = coalesce(read_at, now())
+  where user_id = auth.uid()
+    and is_read = false
+    and (p_notification_ids is null or id = any(p_notification_ids));
+
+  get diagnostics v_updated = row_count;
+  return v_updated;
+end;
+$$;
+
+-- RPC 4: Dismiss (clear) notifications for current user
+create or replace function public.dismiss_notifications(p_notification_ids uuid[] default null)
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_updated integer;
+begin
+  if auth.uid() is null then
+    raise exception 'Authentication required.';
+  end if;
+
+  update public.notifications
+  set
+    is_read = true,
+    read_at = coalesce(read_at, now()),
+    is_dismissed = true,
+    dismissed_at = coalesce(dismissed_at, now())
+  where user_id = auth.uid()
+    and is_dismissed = false
+    and (p_notification_ids is null or id = any(p_notification_ids));
+
+  get diagnostics v_updated = row_count;
+  return v_updated;
+end;
+$$;
+
 grant execute on function public.place_storefront_order(uuid, text, text, text, text, jsonb, text, text, text) to anon, authenticated;
 grant execute on function public.track_storefront_order(uuid, text) to anon, authenticated;
+grant execute on function public.mark_notifications_read(uuid[]) to authenticated;
+grant execute on function public.dismiss_notifications(uuid[]) to authenticated;
 grant execute on function public.is_store_billing_closed(uuid) to anon, authenticated;
 grant execute on function public.is_store_publicly_open(uuid) to anon, authenticated;
 
@@ -1224,8 +1471,19 @@ create policy "platform_channels_admin" on public.platform_payment_channels
   for all using (public.current_user_role_id() = 1);
 
 drop policy if exists "notifications_owner" on public.notifications;
-create policy "notifications_owner" on public.notifications
-  for all using (user_id = auth.uid() or public.current_user_role_id() = 1);
+drop policy if exists "notifications_select_own_or_admin" on public.notifications;
+create policy "notifications_select_own_or_admin" on public.notifications
+  for select using (user_id = auth.uid() or public.current_user_role_id() = 1);
+
+drop policy if exists "notifications_update_own_or_admin" on public.notifications;
+create policy "notifications_update_own_or_admin" on public.notifications
+  for update using (user_id = auth.uid() or public.current_user_role_id() = 1)
+  with check (user_id = auth.uid() or public.current_user_role_id() = 1);
+
+drop policy if exists "notifications_admin_insert_delete" on public.notifications;
+create policy "notifications_admin_insert_delete" on public.notifications
+  for all using (public.current_user_role_id() = 1)
+  with check (public.current_user_role_id() = 1);
 
 drop policy if exists "user_notification_states_owner" on public.user_notification_states;
 create policy "user_notification_states_owner" on public.user_notification_states

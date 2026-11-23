@@ -173,20 +173,44 @@ export function BuyerAccountMenuModal({
                         })}
                       </div>
 
-                      <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
-                        <span className="text-slate-500">
-                          {order.items.length} item{order.items.length > 1 ? 's' : ''} ·{' '}
-                          <strong className="text-slate-900">
-                            {formatCurrency(order.grandTotal, currency as CurrencyCode)}
-                          </strong>
-                        </span>
+                      <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2 text-xs">
+                        <div className="flex flex-wrap items-center gap-2 text-slate-500">
+                          <span>
+                            {order.items.length} item{order.items.length > 1 ? 's' : ''} ·{' '}
+                            <strong className="text-slate-900">
+                              {formatCurrency(
+                                order.grandTotal,
+                                (order.currency ?? currency) as CurrencyCode
+                              )}
+                            </strong>
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded-md text-[10px] font-semibold border ${
+                              order.paymentStatus === 'paid'
+                                ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                                : order.paymentStatus === 'pending_verification'
+                                  ? 'bg-amber-50 border-amber-200 text-amber-700'
+                                  : order.paymentStatus === 'refunded'
+                                    ? 'bg-rose-50 border-rose-200 text-rose-700'
+                                    : 'bg-slate-50 border-slate-200 text-slate-600'
+                            }`}
+                          >
+                            {order.paymentStatus === 'paid'
+                              ? 'Paid'
+                              : order.paymentStatus === 'pending_verification'
+                                ? 'Pending Verification'
+                                : order.paymentStatus === 'refunded'
+                                  ? 'Refunded'
+                                  : 'Unpaid'}
+                          </span>
+                        </div>
                         <button
                           type="button"
                           onClick={() => {
                             onClose();
                             onOpenTracking(order.id);
                           }}
-                          className="inline-flex items-center gap-1 font-semibold text-blue-600 hover:text-blue-700 cursor-pointer"
+                          className="inline-flex items-center gap-1 font-semibold text-blue-600 hover:text-blue-700 cursor-pointer shrink-0"
                         >
                           <span>Live Tracking</span>
                           <ChevronRight className="w-3.5 h-3.5" />

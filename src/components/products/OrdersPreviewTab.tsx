@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { PackageCheck, Receipt, X } from 'lucide-react';
-import { CurrencyCode, OrderFulfillmentStatus } from '../../types/schema';
+import { CurrencyCode, OrderFulfillmentStatus, OrderPaymentStatus } from '../../types/schema';
 import { formatCurrency } from '../../utils/pricing';
 import { UnifiedOrderRow } from '../../utils/storeOrders';
 import {
@@ -18,13 +18,25 @@ interface OrdersPreviewTabProps {
     status: OrderFulfillmentStatus,
     isLivePlaced: boolean
   ) => void;
+  onUpdateOrderPaymentStatus?: (
+    orderId: string,
+    paymentStatus: OrderPaymentStatus
+  ) => void;
 }
+
+const PAYMENT_STATUS_LABEL: Record<OrderPaymentStatus, string> = {
+  unpaid: 'Unpaid',
+  pending_verification: 'Pending Verification',
+  paid: 'Paid',
+  refunded: 'Refunded',
+};
 
 export function OrdersPreviewTab({
   storeName,
   currency,
   orders,
   onUpdateOrderStatus,
+  onUpdateOrderPaymentStatus,
 }: OrdersPreviewTabProps) {
   const [previewReceiptOrder, setPreviewReceiptOrder] = useState<UnifiedOrderRow | null>(null);
   const pagination = usePagination(orders, DEFAULT_TABLE_PAGE_SIZE, storeName);
@@ -90,20 +102,59 @@ export function OrdersPreviewTab({
                     {order.itemsSummary}
                   </td>
                   <td className="py-3.5 px-4 text-xs font-medium text-slate-700 whitespace-nowrap">
-                    <span>{order.paymentMethod}</span>
-                    {order.paymentProofUrl && (
-                      <button
-                        type="button"
-                        onClick={() => setPreviewReceiptOrder(order)}
-                        className="mt-1 flex items-center gap-1 text-[11px] font-semibold text-slate-900 underline underline-offset-2 hover:text-slate-600 cursor-pointer"
-                      >
-                        <Receipt className="w-3 h-3" />
-                        View Receipt
-                      </button>
-                    )}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <span>{order.paymentMethod}</span>
+                        {order.paymentReferenceNumber && (
+                          <span className="font-mono text-[10px] text-slate-500">
+                            #{order.paymentReferenceNumber}
+                          </span>
+                        )}
+                      </div>
+                      {onUpdateOrderPaymentStatus ? (
+                        <select
+                          aria-label={`Payment status for ${order.id}`}
+                          value={order.paymentStatus}
+                          onChange={(e) =>
+                            onUpdateOrderPaymentStatus(
+                              order.id,
+                              e.target.value as OrderPaymentStatus
+                            )
+                          }
+                          className={`min-h-[28px] px-2 py-0.5 text-[11px] font-semibold border rounded-md focus:outline-none focus:ring-2 focus:ring-slate-900 cursor-pointer ${
+                            order.paymentStatus === 'paid'
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                              : order.paymentStatus === 'pending_verification'
+                                ? 'bg-amber-50 border-amber-200 text-amber-700'
+                                : order.paymentStatus === 'refunded'
+                                  ? 'bg-rose-50 border-rose-200 text-rose-700'
+                                  : 'bg-slate-50 border-slate-200 text-slate-700'
+                          }`}
+                        >
+                          <option value="unpaid">Unpaid</option>
+                          <option value="pending_verification">Pending Verification</option>
+                          <option value="paid">Paid</option>
+                          <option value="refunded">Refunded</option>
+                        </select>
+                      ) : (
+                        <span className="inline-block text-[11px] font-semibold text-slate-600">
+                          {PAYMENT_STATUS_LABEL[order.paymentStatus]}
+                        </span>
+                      )}
+                      {order.paymentProofUrl && (
+                        <button
+                          type="button"
+                          onClick={() => setPreviewReceiptOrder(order)}
+                          className="flex items-center gap-1 text-[11px] font-semibold text-slate-900 underline underline-offset-2 hover:text-slate-600 cursor-pointer"
+                        >
+                          <Receipt className="w-3 h-3" />
+                          View Receipt
+                        </button>
+                      )}
+                    </div>
                   </td>
                   <td className="py-3.5 px-4 text-right font-mono tabular-nums font-bold text-slate-900 whitespace-nowrap">
-                    {formatCurrency(order.total, currency)}
+                    {formatCurrency(order.total, order.currency ?? currency)}
                   </td>
                   <td className="py-3.5 px-5 text-right whitespace-nowrap">
                     <select

@@ -701,8 +701,33 @@ export function OrderTrackingModal({
                   className="pt-3 border-t flex items-center justify-between gap-2"
                   style={{ borderColor: theme.borderColor }}
                 >
-                  <span style={{ color: theme.textMuted }}>Payment Method</span>
-                  <span className="font-semibold">{trackedOrder.paymentMethod}</span>
+                  <div>
+                    <span className="block" style={{ color: theme.textMuted }}>
+                      Payment Method
+                    </span>
+                    <span className="font-semibold">
+                      {trackedOrder.paymentMethod}
+                      {trackedOrder.paymentReferenceNumber
+                        ? ` · Ref #${trackedOrder.paymentReferenceNumber}`
+                        : ''}
+                    </span>
+                  </div>
+                  <span
+                    className="px-2 py-0.5 rounded-md text-[10px] font-semibold border shrink-0"
+                    style={{
+                      backgroundColor: theme.subtleBg,
+                      borderColor: theme.borderColor,
+                      color: theme.textPrimary,
+                    }}
+                  >
+                    {trackedOrder.paymentStatus === 'paid'
+                      ? 'Paid'
+                      : trackedOrder.paymentStatus === 'pending_verification'
+                        ? 'Pending Verification'
+                        : trackedOrder.paymentStatus === 'refunded'
+                          ? 'Refunded'
+                          : 'Unpaid (COD)'}
+                  </span>
                 </div>
 
                 {/* Items List */}

@@ -68,6 +68,7 @@ export function StoreProductsManagerPage() {
     getStoreProducts,
     getStoreOrders,
     updateOrderStatus,
+    updateOrderPaymentStatus,
     createProduct,
     updateProduct,
     deleteProduct,
@@ -388,6 +389,18 @@ export function StoreProductsManagerPage() {
     status: OrderFulfillmentStatus
   ) => {
     updateOrderStatus(orderId, status);
+  };
+
+  const handleUpdateOrderPaymentStatus = (
+    orderId: string,
+    paymentStatus: Parameters<typeof updateOrderPaymentStatus>[1]
+  ) => {
+    updateOrderPaymentStatus(orderId, paymentStatus);
+    pushToast({
+      type: paymentStatus === 'paid' ? 'success' : 'info',
+      title: `Payment status updated`,
+      description: `Order ${orderId} payment marked as ${paymentStatus.replace('_', ' ')}.`,
+    });
   };
 
   const handleSelectTab = (tab: ManagerTab) => {
@@ -1027,6 +1040,7 @@ export function StoreProductsManagerPage() {
             currency={draftPayments.currency}
             orders={combinedOrders}
             onUpdateOrderStatus={handleUpdateOrderStatus}
+            onUpdateOrderPaymentStatus={handleUpdateOrderPaymentStatus}
           />
         )}
       </main>

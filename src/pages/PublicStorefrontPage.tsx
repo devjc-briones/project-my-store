@@ -287,6 +287,7 @@ export function PublicStorefrontPage() {
         {
           key: lineKey,
           productId: product.id,
+          variantId: matchedVariant?.id,
           name: product.name,
           variant: variantLabel,
           imageUrl: product.imageUrl,

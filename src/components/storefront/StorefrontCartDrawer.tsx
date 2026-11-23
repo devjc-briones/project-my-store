@@ -37,6 +37,7 @@ import { BuyerAuthModal } from './BuyerAuthModal';
 export interface CartLineItem {
   key: string;
   productId: string;
+  variantId?: string;
   name: string;
   variant?: string;
   imageUrl?: string;
@@ -154,6 +155,7 @@ export function StorefrontCartDrawer({
   // Online QR payment modal & proof-of-payment state
   const [paymentQrModalOpen, setPaymentQrModalOpen] = useState(false);
   const [paymentProofUrl, setPaymentProofUrl] = useState<string>('');
+  const [paymentReferenceNumber, setPaymentReferenceNumber] = useState<string>('');
   const [paymentProofError, setPaymentProofError] = useState<string | null>(null);
   const [shakeProofUpload, setShakeProofUpload] = useState(false);
   const [copiedAccountNumber, setCopiedAccountNumber] = useState(false);
@@ -299,6 +301,7 @@ export function StorefrontCartDrawer({
 
   useEffect(() => {
     setPaymentProofUrl('');
+    setPaymentReferenceNumber('');
     setPaymentProofError(null);
     setShakeProofUpload(false);
     setCopiedAccountNumber(false);
@@ -452,14 +455,20 @@ export function StorefrontCartDrawer({
       phoneNumber: phoneNumber.trim(),
       deliveryAddress: deliveryAddress.trim(),
       notes: notes.trim() || undefined,
+      currency,
+      paymentMethodKey: selectedMethod.key,
       paymentMethod: selectedMethod.label,
+      paymentStatus: selectedMethod.key === 'cod' ? 'unpaid' : 'pending_verification',
+      paymentReferenceNumber: paymentReferenceNumber.trim() || undefined,
       paymentProofUrl: proofUrl,
       items: items.map((item) => ({
         productId: item.productId,
+        variantId: item.variantId,
         name: item.name,
         variant: item.variant,
         quantity: item.quantity,
         unitPrice: item.unitPrice,
+        lineTotal: Math.round(item.unitPrice * item.quantity * 100) / 100,
       })),
       subtotal,
       deliveryFee,
@@ -470,6 +479,7 @@ export function StorefrontCartDrawer({
 
     setPaymentQrModalOpen(false);
     setPaymentProofUrl('');
+    setPaymentReferenceNumber('');
     setPaymentProofError(null);
     setShakeProofUpload(false);
     setCopiedAccountNumber(false);
@@ -583,6 +593,7 @@ export function StorefrontCartDrawer({
     setIsKeyboardOpen(false);
     setPaymentQrModalOpen(false);
     setPaymentProofUrl('');
+    setPaymentReferenceNumber('');
     setPaymentProofError(null);
     setShakeProofUpload(false);
     setCopiedAccountNumber(false);
@@ -607,6 +618,7 @@ export function StorefrontCartDrawer({
     setCopiedOrderId(false);
     setPaymentQrModalOpen(false);
     setPaymentProofUrl('');
+    setPaymentReferenceNumber('');
     setPaymentProofError(null);
     setFieldErrors({});
     setShakeForm(false);
@@ -721,8 +733,31 @@ export function StorefrontCartDrawer({
                 </div>
 
                 <div className="pt-2 border-t space-y-2" style={{ borderColor: theme.borderColor }}>
-                  <p className="font-semibold">Payment Method</p>
-                  <p style={{ color: theme.textMuted }}>{receiptOrder.paymentMethod}</p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-semibold">Payment Method</p>
+                    <span
+                      className="px-2 py-0.5 rounded-md text-[10px] font-semibold border"
+                      style={{
+                        backgroundColor: theme.subtleBg,
+                        borderColor: theme.borderColor,
+                        color: theme.textPrimary,
+                      }}
+                    >
+                      {receiptOrder.paymentStatus === 'paid'
+                        ? 'Paid'
+                        : receiptOrder.paymentStatus === 'pending_verification'
+                          ? 'Pending Verification'
+                          : receiptOrder.paymentStatus === 'refunded'
+                            ? 'Refunded'
+                            : 'Unpaid (COD)'}
+                    </span>
+                  </div>
+                  <p style={{ color: theme.textMuted }}>
+                    {receiptOrder.paymentMethod}
+                    {receiptOrder.paymentReferenceNumber
+                      ? ` · Ref #${receiptOrder.paymentReferenceNumber}`
+                      : ''}
+                  </p>
                   {receiptOrder.paymentProofUrl && (
                     <div className="flex items-center gap-2.5 pt-1">
                       <img
@@ -1727,6 +1762,29 @@ export function StorefrontCartDrawer({
                     <span>{paymentProofError}</span>
                   </p>
                 )}
+
+                <div className="pt-1 space-y-1.5">
+                  <label
+                    htmlFor="qr-payment-reference"
+                    className="block text-[11px] font-semibold"
+                    style={{ color: theme.textMuted }}
+                  >
+                    Transfer Reference # (Optional)
+                  </label>
+                  <input
+                    id="qr-payment-reference"
+                    type="text"
+                    value={paymentReferenceNumber}
+                    onChange={(e) => setPaymentReferenceNumber(e.target.value)}
+                    placeholder="e.g. 9024 1184 3310"
+                    className="w-full min-h-[40px] px-3 py-2 text-xs font-mono border rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900/20"
+                    style={{
+                      backgroundColor: theme.subtleBg,
+                      borderColor: theme.borderColor,
+                      color: theme.textPrimary,
+                    }}
+                  />
+                </div>
               </div>
             </div>
 
