@@ -14,6 +14,7 @@ import {
   SubscriptionTransaction,
   User,
 } from '../types/schema';
+import { generateUuid, isUuid } from './supabaseClient';
 
 export function clampNonNegative(value: number | undefined, fallback = 0): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
@@ -54,11 +55,12 @@ export function toDbUserRow(user: User | BuyerAccount) {
   const isBuyer = 'savedCheckoutInfo' in user || user.role === Roles.Buyer;
   const role: Roles = user.role ?? Roles.Seller;
   const roleId = user.roleId ?? ROLE_TO_ID[role];
+  const safeUserId = isUuid(user.id) ? user.id : generateUuid();
 
   if (isBuyer) {
     const buyer = user as BuyerAccount;
     return {
-      id: buyer.id,
+      id: safeUserId,
       role_id: roleId,
       name: buyer.name.trim(),
       email: buyer.email.trim().toLowerCase(),
@@ -70,7 +72,7 @@ export function toDbUserRow(user: User | BuyerAccount) {
       delivery_notes: buyer.savedCheckoutInfo?.notes?.trim() || null,
       preferred_payment_method: buyer.savedCheckoutInfo?.preferredPaymentMethod ?? null,
       checkout_info_updated_at: buyer.savedCheckoutInfo?.updatedAt ?? null,
-      registered_store_id: buyer.storeId ?? null,
+      registered_store_id: isUuid(buyer.storeId) ? buyer.storeId : null,
       created_at: buyer.createdAt,
       updated_at: buyer.updatedAt ?? buyer.createdAt,
     };
@@ -78,7 +80,7 @@ export function toDbUserRow(user: User | BuyerAccount) {
 
   const merchantOrAdmin = user as User;
   return {
-    id: merchantOrAdmin.id,
+    id: safeUserId,
     role_id: roleId,
     name: merchantOrAdmin.name.trim(),
     email: merchantOrAdmin.email.trim().toLowerCase(),
@@ -93,7 +95,7 @@ export function toDbUserRow(user: User | BuyerAccount) {
     delivery_notes: merchantOrAdmin.deliveryNotes?.trim() || null,
     preferred_payment_method: merchantOrAdmin.preferredPaymentMethod ?? null,
     checkout_info_updated_at: merchantOrAdmin.checkoutInfoUpdatedAt ?? null,
-    registered_store_id: merchantOrAdmin.registeredStoreId ?? null,
+    registered_store_id: isUuid(merchantOrAdmin.registeredStoreId) ? merchantOrAdmin.registeredStoreId : null,
     last_active_at: merchantOrAdmin.lastActiveAt ?? merchantOrAdmin.createdAt,
     created_at: merchantOrAdmin.createdAt,
     updated_at: merchantOrAdmin.updatedAt ?? merchantOrAdmin.createdAt,
@@ -102,8 +104,8 @@ export function toDbUserRow(user: User | BuyerAccount) {
 
 export function toDbStoreRow(store: Store) {
   return {
-    id: store.id,
-    user_id: store.ownerId,
+    id: isUuid(store.id) ? store.id : generateUuid(),
+    user_id: isUuid(store.ownerId) ? store.ownerId : generateUuid(),
     name: store.name.trim(),
     slug: store.slug.trim().toLowerCase(),
     template_id: store.templateId,
@@ -139,8 +141,8 @@ export function toDbStoreRow(store: Store) {
 
 export function toDbProductRow(product: Product) {
   return {
-    id: product.id,
-    store_id: product.storeId,
+    id: isUuid(product.id) ? product.id : generateUuid(),
+    store_id: isUuid(product.storeId) ? product.storeId : generateUuid(),
     name: product.name.trim(),
     description: product.description ?? '',
     category: product.category.trim() || 'General',
@@ -164,9 +166,10 @@ export function toDbProductRow(product: Product) {
 }
 
 export function toDbVariantRows(productId: string, variants: ProductVariant[]) {
+  const safeProdId = isUuid(productId) ? productId : generateUuid();
   return variants.map((variant, index) => ({
-    id: variant.id,
-    product_id: productId,
+    id: isUuid(variant.id) ? variant.id : generateUuid(),
+    product_id: safeProdId,
     label: variant.label.trim(),
     attribute_name: variant.attributeName.trim() || 'Option',
     value: variant.value.trim(),
@@ -179,7 +182,7 @@ export function toDbVariantRows(productId: string, variants: ProductVariant[]) {
 
 export function toDbCheckoutSettingsRow(settings: PaymentSettings) {
   return {
-    store_id: settings.storeId,
+    store_id: isUuid(settings.storeId) ? settings.storeId : generateUuid(),
     currency: settings.currency,
     shipping_fee: clampNonNegative(settings.shippingFee),
     free_shipping_threshold: clampNonNegative(settings.freeShippingThreshold),
@@ -190,9 +193,10 @@ export function toDbCheckoutSettingsRow(settings: PaymentSettings) {
 }
 
 export function toDbStorePaymentMethodRows(settings: PaymentSettings) {
+  const safeStoreId = isUuid(settings.storeId) ? settings.storeId : generateUuid();
   return [
     {
-      store_id: settings.storeId,
+      store_id: safeStoreId,
       method_key: 'gcash' as const,
       is_enabled: Boolean(settings.gcashEnabled),
       bank_name: null,
@@ -241,14 +245,14 @@ export function toDbStorePaymentMethodRows(settings: PaymentSettings) {
 export function toDbPlaceOrderRpcPayload(order: CustomerOrder) {
   const methodKey = derivePaymentMethodKey(order.paymentMethodKey, order.paymentMethod);
   return {
-    p_store_id: order.storeId,
+    p_store_id: isUuid(order.storeId) ? order.storeId : generateUuid(),
     p_customer_name: order.customerName.trim(),
     p_phone_number: order.phoneNumber.trim(),
     p_delivery_address: order.deliveryAddress.trim(),
     p_method_key: methodKey,
     p_items: order.items.map((item) => ({
-      store_product_id: item.productId,
-      variant_id: item.variantId ?? null,
+      store_product_id: isUuid(item.productId) ? item.productId : generateUuid(),
+      variant_id: isUuid(item.variantId) ? item.variantId : null,
       variant_label: item.variant ?? null,
       quantity: Math.max(1, Math.floor(item.quantity)),
     })),
@@ -263,10 +267,10 @@ export function toDbStoreProductPaymentRow(order: CustomerOrder) {
   const paymentStatus = deriveOrderPaymentStatus(methodKey, order.paymentStatus);
   const firstItem = order.items[0];
   return {
-    order_id: order.id,
-    store_id: order.storeId,
-    user_id: order.buyerId ?? null,
-    store_product_id: firstItem?.productId ?? null,
+    order_id: isUuid(order.id) ? order.id : generateUuid(),
+    store_id: isUuid(order.storeId) ? order.storeId : generateUuid(),
+    user_id: isUuid(order.buyerId) ? order.buyerId : null,
+    store_product_id: isUuid(firstItem?.productId) ? firstItem.productId : null,
     method_key: methodKey,
     method_label: order.paymentMethod,
     payment_status: paymentStatus,
@@ -276,7 +280,7 @@ export function toDbStoreProductPaymentRow(order: CustomerOrder) {
     reference_number: order.paymentReferenceNumber?.trim() || null,
     payment_proof_url: order.paymentProofUrl ?? null,
     paid_at: order.paidAt ?? null,
-    verified_by: order.verifiedBy ?? null,
+    verified_by: isUuid(order.verifiedBy) ? order.verifiedBy : null,
     created_at: order.createdAt,
     updated_at: order.updatedAt ?? order.createdAt,
   };
@@ -284,9 +288,9 @@ export function toDbStoreProductPaymentRow(order: CustomerOrder) {
 
 export function toDbSubscriptionRow(tx: SubscriptionTransaction) {
   return {
-    id: tx.id,
+    id: isUuid(tx.id) ? tx.id : generateUuid(),
     reference_id: tx.referenceId,
-    user_id: tx.userId,
+    user_id: isUuid(tx.userId) ? tx.userId : generateUuid(),
     plan_id: tx.planId,
     amount: clampNonNegative(tx.amount),
     payment_method: tx.paymentMethod,
@@ -295,7 +299,7 @@ export function toDbSubscriptionRow(tx: SubscriptionTransaction) {
     period_start: tx.periodStart ?? null,
     period_end: tx.periodEnd ?? null,
     proof_url: tx.proofUrl ?? null,
-    approved_by: tx.approvedBy ?? null,
+    approved_by: isUuid(tx.approvedBy) ? tx.approvedBy : null,
     approved_at: tx.approvedAt ?? null,
     created_at: tx.createdAt,
     updated_at: tx.updatedAt ?? tx.createdAt,

@@ -298,7 +298,7 @@ export function BuyerAuthModal({
     setOtpVerified(true);
   };
 
-  const handleNewPasswordSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleNewPasswordSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (isResetting) return;
 
@@ -316,19 +316,22 @@ export function BuyerAuthModal({
     setNewPassError(undefined);
     setIsResetting(true);
 
-    window.setTimeout(() => {
-      buyerResetPassword(resetEmail.trim(), newPassword);
-      setIsResetting(false);
-      setResetSent(true);
-      pushToast({
-        type: 'success',
-        title: 'Password updated',
-        description: `You can now sign in to ${resetEmail.trim()} with your new password.`,
-      });
-    }, 450);
+    const res = await buyerResetPassword(resetEmail.trim(), newPassword);
+    setIsResetting(false);
+    if (!res.success) {
+      setNewPassError(res.error || 'Failed to update password in database.');
+      triggerShake('reset');
+      return;
+    }
+    setResetSent(true);
+    pushToast({
+      type: 'success',
+      title: 'Password updated',
+      description: `You can now sign in to ${resetEmail.trim()} with your new password.`,
+    });
   };
 
-  const handleSignInSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSignInSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (loading) return;
 
@@ -349,24 +352,34 @@ export function BuyerAuthModal({
     }
 
     setLoading(true);
-    const res = buyerSignIn(trimmedEmail.toLowerCase(), signinPassword);
-    setLoading(false);
+    try {
+      const res = await buyerSignIn(trimmedEmail.toLowerCase(), signinPassword);
+      setLoading(false);
 
-    if (res.error) {
-      setSigninErrors({ form: res.error });
+      if (res.error || !res.success) {
+        const msg = res.error || 'Sign in failed.';
+        setSigninErrors({ form: msg });
+        pushToast({ type: 'error', title: 'Sign In Failed', description: msg });
+        triggerShake('signin');
+      } else {
+        pushToast({
+          type: 'success',
+          title: 'Signed in successfully',
+          description: `Welcome back, ${res.buyer?.name ?? 'shopper'}.`,
+        });
+        onSuccess(res.buyer);
+        onClose();
+      }
+    } catch (err: any) {
+      setLoading(false);
+      const msg = err?.message || 'Unable to connect to database.';
+      setSigninErrors({ form: msg });
+      pushToast({ type: 'error', title: 'Database Error', description: msg });
       triggerShake('signin');
-    } else {
-      pushToast({
-        type: 'success',
-        title: 'Signed in successfully',
-        description: `Welcome back, ${res.buyer?.name ?? 'shopper'}.`,
-      });
-      onSuccess(res.buyer);
-      onClose();
     }
   };
 
-  const handleSignUpSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSignUpSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (loading) return;
 
@@ -402,26 +415,36 @@ export function BuyerAuthModal({
     }
 
     setLoading(true);
-    const res = buyerSignUp({
-      name: trimmedName,
-      email: trimmedEmail.toLowerCase(),
-      password: signupPassword,
-      storeId,
-      storeName,
-    });
-    setLoading(false);
-
-    if (res.error) {
-      setSignupErrors({ form: res.error });
-      triggerShake('signup');
-    } else {
-      pushToast({
-        type: 'success',
-        title: 'Account created',
-        description: `Welcome to mystore, ${trimmedName}.`,
+    try {
+      const res = await buyerSignUp({
+        name: trimmedName,
+        email: trimmedEmail.toLowerCase(),
+        password: signupPassword,
+        storeId,
+        storeName,
       });
-      onSuccess(res.buyer);
-      onClose();
+      setLoading(false);
+
+      if (res.error || !res.success) {
+        const msg = res.error || 'Unable to create account.';
+        setSignupErrors({ form: msg });
+        pushToast({ type: 'error', title: 'Sign Up Failed', description: msg });
+        triggerShake('signup');
+      } else {
+        pushToast({
+          type: 'success',
+          title: 'Account created',
+          description: `Welcome to mystore, ${trimmedName}.`,
+        });
+        onSuccess(res.buyer);
+        onClose();
+      }
+    } catch (err: any) {
+      setLoading(false);
+      const msg = err?.message || 'Unable to connect to database.';
+      setSignupErrors({ form: msg });
+      pushToast({ type: 'error', title: 'Database Error', description: msg });
+      triggerShake('signup');
     }
   };
 

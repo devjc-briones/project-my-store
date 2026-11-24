@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import {
+  AppNotification,
   BuyerAccount,
   BuyerCheckoutInfo,
   CustomerOrder,
@@ -34,6 +35,7 @@ import {
   clampStock,
   deriveOrderPaymentStatus,
   derivePaymentMethodKey,
+  toDbUserRow,
 } from '../utils/supabaseMappers';
 import {
   syncOrderToSupabase,
@@ -44,6 +46,7 @@ import {
   syncSubscriptionToSupabase,
   syncUserToSupabase,
 } from '../utils/supabaseSync';
+import { generateUuid, getSupabaseClient, getSupabaseConfigStatus, isSupabaseConfigured } from '../utils/supabaseClient';
 import { AppRoute, buildRoutePath, parseRoute } from '../router/routes';
 
 const STORAGE_KEY = 'mystore_saas_state_v2';
@@ -84,18 +87,18 @@ interface StoreContextValue {
   pushToast: (toast: Omit<ToastMessage, 'id'>) => void;
   dismissToast: (id: string) => void;
 
-  // Auth / User actions
+  // Auth / User actions (Strictly direct to Supabase Database)
   signInUser: (
     email: string,
     password: string
-  ) => { success: boolean; user?: User; error?: string };
+  ) => Promise<{ success: boolean; user?: User; error?: string }>;
   signUpUser: (
     name: string,
     email: string,
     password: string
-  ) => { success: boolean; user?: User; error?: string };
-  signInAdminUser: (email: string, password: string) => { success: boolean; error?: string };
-  resetUserPassword: (email: string, newPassword: string) => boolean;
+  ) => Promise<{ success: boolean; user?: User; error?: string }>;
+  signInAdminUser: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  resetUserPassword: (email: string, newPassword: string) => Promise<{ success: boolean; error?: string }>;
   signOut: () => void;
   updateUserProfile: (
     updates: Partial<Pick<User, 'name' | 'email' | 'plan' | 'planPeriodEndsAt' | 'cancelAtPeriodEnd'>>
@@ -139,19 +142,19 @@ interface StoreContextValue {
     verifiedBy?: string
   ) => void;
 
-  // Buyer Auth & Orders
+  // Buyer Auth & Orders (Direct to Supabase)
   buyerSignUp: (input: {
     name: string;
     email: string;
     password: string;
     storeId?: string;
     storeName?: string;
-  }) => { success: boolean; buyer?: BuyerAccount; error?: string };
+  }) => Promise<{ success: boolean; buyer?: BuyerAccount; error?: string }>;
   buyerSignIn: (
     email: string,
     password: string
-  ) => { success: boolean; buyer?: BuyerAccount; error?: string };
-  buyerResetPassword: (email: string, newPassword: string) => void;
+  ) => Promise<{ success: boolean; buyer?: BuyerAccount; error?: string }>;
+  buyerResetPassword: (email: string, newPassword: string) => Promise<{ success: boolean; error?: string }>;
   buyerSignOut: () => void;
   getBuyerOrders: () => CustomerOrder[];
   getBuyerCheckoutInfo: () => BuyerCheckoutInfo | null;
@@ -209,78 +212,21 @@ interface StoreContextValue {
 const StoreContext = createContext<StoreContextValue | null>(null);
 
 function loadInitialState(): GlobalAppState {
-  if (typeof window === 'undefined') {
-    return INITIAL_SEED_STATE;
-  }
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return INITIAL_SEED_STATE;
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // ignore
     }
-    const parsed = JSON.parse(raw) as GlobalAppState;
-    if (!parsed || !Array.isArray(parsed.stores) || !Array.isArray(parsed.products)) {
-      return INITIAL_SEED_STATE;
-    }
-
-    parsed.users = (Array.isArray(parsed.users) ? parsed.users : []).map((u) => ({
-      ...u,
-      role: u.role ?? Roles.Seller,
-      roleId: u.roleId ?? ROLE_TO_ID[u.role ?? Roles.Seller],
-    }));
-    parsed.buyers = (Array.isArray(parsed.buyers) ? parsed.buyers : []).map((b) => ({
-      ...b,
-      role: b.role ?? Roles.Buyer,
-      roleId: b.roleId ?? 3,
-    }));
-    parsed.placedOrders = (Array.isArray(parsed.placedOrders) ? parsed.placedOrders : []).map(
-      (o) => {
-        const methodKey = derivePaymentMethodKey(o.paymentMethodKey, o.paymentMethod);
-        return {
-          ...o,
-          currency: o.currency ?? 'PHP',
-          paymentMethodKey: methodKey,
-          paymentStatus: deriveOrderPaymentStatus(methodKey, o.paymentStatus),
-          amountPaid: o.amountPaid ?? (o.paymentStatus === 'paid' ? o.grandTotal : 0),
-        };
-      }
-    );
-    parsed.subscriptionTransactions = Array.isArray(parsed.subscriptionTransactions)
-      ? parsed.subscriptionTransactions
-      : [];
-    parsed.notifications = Array.isArray(parsed.notifications) ? parsed.notifications : [];
-    parsed.paymentSettingsByStore = parsed.paymentSettingsByStore ?? {};
-    parsed.platformPaymentSettings =
-      parsed.platformPaymentSettings && Array.isArray(parsed.platformPaymentSettings.channels)
-        ? parsed.platformPaymentSettings
-        : createDefaultPlatformPaymentSettings();
-
-    parsed.stores = parsed.stores.map((s) => ({
-      ...s,
-      branding: {
-        ...s.branding,
-        backgroundMode: s.branding?.backgroundMode ?? 'light',
-        buttonStyle: s.branding?.buttonStyle ?? 'rounded',
-        fontPairing: s.branding?.fontPairing ?? 'modern-sans',
-        heroCtaLabel: s.branding?.heroCtaLabel ?? 'Shop Now',
-        heroBannerUrl: resolveTemplateAssetUrl(s.branding?.heroBannerUrl),
-        logoImageUrl: resolveTemplateAssetUrl(s.branding?.logoImageUrl),
-      },
-    }));
-    parsed.products = parsed.products.map((p) => ({
-      ...p,
-      imageUrl: resolveTemplateAssetUrl(p.imageUrl),
-      variants: Array.isArray(p.variants)
-        ? p.variants.map((v, idx) => ({ ...v, sortOrder: v.sortOrder ?? idx }))
-        : [],
-    }));
-    return parsed;
-  } catch {
-    return INITIAL_SEED_STATE;
   }
+  return INITIAL_SEED_STATE;
 }
 
 function generateId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  if (prefix === 'tst') {
+    return `tst_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  }
+  return generateUuid();
 }
 
 export function StoreProvider({ children }: { children: React.ReactNode }) {
@@ -293,77 +239,373 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [routeHistory, setRouteHistory] = useState<AppRoute[]>([]);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
-  // Persist global state to LocalStorage
+  // Hydrate state from Supabase on mount if configured
   useEffect(() => {
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch {
-      // Ignore storage quota issues in restricted environments
-    }
-  }, [state]);
+    if (!isSupabaseConfigured) return;
+    const client = getSupabaseClient();
+    if (!client) return;
 
-  // Automatically revert scheduled cancellations back to Free once the paid period expires
-  useEffect(() => {
-    const usersList = state.users ?? [];
-    const nowMs = Date.now();
-    let needsUpdate = false;
+    async function hydrateFromSupabase() {
+      try {
+        const [
+          { data: dbUsers },
+          { data: dbStores },
+          { data: dbProducts },
+          { data: dbVariants },
+          { data: dbCheckoutSettings },
+          { data: dbPaymentSettings },
+          { data: dbOrders },
+          { data: dbOrderItems },
+          { data: dbPayments },
+          { data: dbSubs },
+          { data: dbChannels },
+          { data: dbNotifications },
+        ] = await Promise.all([
+          client!.from('users').select('*'),
+          client!.from('stores').select('*'),
+          client!.from('store_products').select('*'),
+          client!.from('store_product_variants').select('*'),
+          client!.from('store_checkout_settings').select('*'),
+          client!.from('store_payments_settings').select('*'),
+          client!.from('buyer_orders').select('*'),
+          client!.from('order_items').select('*'),
+          client!.from('store_product_payments').select('*'),
+          client!.from('subscriptions').select('*'),
+          client!.from('platform_payment_channels').select('*'),
+          client!.from('notifications').select('*'),
+        ]);
 
-    const nextUsers = usersList.map((u) => {
-      if (
-        u.role === Roles.Seller &&
-        u.plan !== 'starter' &&
-        u.cancelAtPeriodEnd &&
-        u.planPeriodEndsAt &&
-        nowMs >= new Date(u.planPeriodEndsAt).getTime()
-      ) {
-        needsUpdate = true;
-        return {
-          ...u,
-          plan: 'starter' as const,
-          cancelAtPeriodEnd: false,
-          planPeriodEndsAt: undefined,
-        };
-      }
-      return u;
-    });
+        const mappedUsers: User[] = (dbUsers || []).map((u: any) => ({
+          id: u.id,
+          name: u.name,
+          email: u.email,
+          role: u.role_id === 1 ? Roles.Admin : u.role_id === 2 ? Roles.Seller : Roles.Buyer,
+          roleId: u.role_id,
+          plan: u.plan || 'starter',
+          status: u.status || 'active',
+          restrictedReason: u.restricted_reason || undefined,
+          cancelAtPeriodEnd: u.cancel_at_period_end || false,
+          planPeriodEndsAt: u.plan_period_ends_at || undefined,
+          phoneNumber: u.phone_number || undefined,
+          address: u.address || undefined,
+          deliveryNotes: u.delivery_notes || undefined,
+          preferredPaymentMethod: u.preferred_payment_method || undefined,
+          checkoutInfoUpdatedAt: u.checkout_info_updated_at || undefined,
+          registeredStoreId: u.registered_store_id || undefined,
+          lastActiveAt: u.last_active_at || u.created_at,
+          createdAt: u.created_at,
+          updatedAt: u.updated_at,
+        }));
 
-    if (needsUpdate) {
-      setState((prev) => ({
-        ...prev,
-        users: nextUsers,
-        currentUser:
-          (prev.currentUser && nextUsers.find((u) => u.id === prev.currentUser?.id)) ||
-          prev.currentUser,
-      }));
-    }
-  }, [state.users]);
+        const mappedStores: Store[] = (dbStores || []).map((s: any) => ({
+            id: s.id,
+            ownerId: s.user_id,
+            name: s.name,
+            slug: s.slug,
+            domainUrl: s.domain_url,
+            templateId: s.template_id,
+            status: s.status,
+            restrictedReason: s.restricted_reason || undefined,
+            branding: {
+              primaryColor: s.primary_color,
+              secondaryColor: s.secondary_color,
+              accentColor: s.accent_color,
+              surfaceColor: s.surface_color,
+              textColor: s.text_color,
+              backgroundMode: s.background_mode,
+              buttonStyle: s.button_style,
+              fontPairing: s.font_pairing,
+              logoText: s.logo_text,
+              logoImageUrl: s.logo_image_url || undefined,
+              heroTitle: s.hero_title,
+              heroSubtitle: s.hero_subtitle,
+              heroCtaLabel: s.hero_cta_label,
+              heroBannerUrl: s.hero_banner_url || undefined,
+              bio: s.bio,
+              announcementEnabled: s.announcement_enabled,
+              announcementText: s.announcement_text,
+              address: s.contact_address || undefined,
+              contactNumber: s.contact_number || undefined,
+              socialLinks: {
+                instagram: s.social_instagram || undefined,
+                facebook: s.social_facebook || undefined,
+                tiktok: s.social_tiktok || undefined,
+                website: s.social_website || undefined,
+              },
+            },
+            createdAt: s.created_at,
+            updatedAt: s.updated_at,
+          }));
 
-  // Listen to browser back/forward navigation
-  useEffect(() => {
-    const handlePopState = () => {
-      setRoute(parseRoute(window.location.pathname, window.location.search));
-    };
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
-  }, []);
+          const variantsMap = new Map<string, any[]>();
+          (dbVariants || []).forEach((v: any) => {
+            const list = variantsMap.get(v.product_id) || [];
+            list.push({
+              id: v.id,
+              productId: v.product_id,
+              label: v.label,
+              attributeName: v.attribute_name,
+              value: v.value,
+              priceDelta: Number(v.price_delta || 0),
+              stock: v.stock,
+              sku: v.sku || undefined,
+              sortOrder: v.sort_order,
+            });
+            variantsMap.set(v.product_id, list);
+          });
 
-  // Sync changes across tabs (e.g. merchant editing store in one tab & viewing /shop/slug in another)
-  useEffect(() => {
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key === STORAGE_KEY && event.newValue) {
-        try {
-          const parsed = JSON.parse(event.newValue) as GlobalAppState;
-          if (parsed && Array.isArray(parsed.stores) && Array.isArray(parsed.products)) {
-            setState(parsed);
-          }
-        } catch {
-          // Ignore malformed storage payload
+          const mappedProducts: Product[] = (dbProducts || []).map((p: any) => ({
+            id: p.id,
+            storeId: p.store_id,
+            name: p.name,
+            description: p.description,
+            category: p.category,
+            sku: p.sku,
+            basePrice: Number(p.base_price || 0),
+            discountType: p.discount_type,
+            discountValue: Number(p.discount_value || 0),
+            discountPercent: Number(p.discount_percent || 0),
+            costPrice: p.cost_price != null ? Number(p.cost_price) : undefined,
+            finalPrice: Number(p.final_price || p.base_price || 0),
+            stock: p.stock,
+            imageUrl: p.image_url || undefined,
+            variants: variantsMap.get(p.id) || [],
+            isFeatured: p.is_featured,
+            isAvailable: p.is_available,
+            createdAt: p.created_at,
+            updatedAt: p.updated_at,
+          }));
+
+          const paymentSettingsByStore: Record<string, PaymentSettings> = {};
+          const checkoutMap = new Map<string, any>();
+          (dbCheckoutSettings || []).forEach((c: any) => checkoutMap.set(c.store_id, c));
+          const paymentsMap = new Map<string, any[]>();
+          (dbPaymentSettings || []).forEach((ps: any) => {
+            const list = paymentsMap.get(ps.store_id) || [];
+            list.push(ps);
+            paymentsMap.set(ps.store_id, list);
+          });
+
+          (dbStores || []).forEach((s: any) => {
+            const co = checkoutMap.get(s.id) || {};
+            const pmList = paymentsMap.get(s.id) || [];
+            const getPm = (key: string) => pmList.find((p: any) => p.method_key === key) || {};
+            const codRec = getPm('cod');
+            const gcashRec = getPm('gcash');
+            const mayaRec = getPm('maya');
+            const bankRec = getPm('bank');
+
+            paymentSettingsByStore[s.id] = {
+              storeId: s.id,
+              currency: co.currency || 'PHP',
+              shippingFee: Number(co.shipping_fee || 0),
+              freeShippingThreshold: Number(co.free_shipping_threshold || 0),
+              taxPercent: Number(co.tax_percent || 0),
+              serviceChargePercent: Number(co.service_charge_percent || 0),
+              codEnabled: Boolean(codRec.is_enabled),
+              codInstructions: codRec.instructions || undefined,
+              gcashEnabled: Boolean(gcashRec.is_enabled),
+              gcashDetails: {
+                accountName: gcashRec.account_name || '',
+                mobileNumber: gcashRec.account_number || '',
+                qrNote: gcashRec.instructions || undefined,
+                qrImageUrl: gcashRec.qr_image_url || undefined,
+              },
+              mayaEnabled: Boolean(mayaRec.is_enabled),
+              mayaDetails: {
+                accountName: mayaRec.account_name || '',
+                mobileNumber: mayaRec.account_number || '',
+                qrNote: mayaRec.instructions || undefined,
+                qrImageUrl: mayaRec.qr_image_url || undefined,
+              },
+              bankTransferEnabled: Boolean(bankRec.is_enabled),
+              bankDetails: {
+                bankName: bankRec.bank_name || '',
+                accountName: bankRec.account_name || '',
+                accountNumber: bankRec.account_number || '',
+                qrImageUrl: bankRec.qr_image_url || undefined,
+              },
+              updatedAt: co.updated_at || s.updated_at,
+            };
+          });
+
+          const itemsMap = new Map<string, any[]>();
+          (dbOrderItems || []).forEach((oi: any) => {
+            const list = itemsMap.get(oi.order_id) || [];
+            list.push({
+              productId: oi.store_product_id || '',
+              variantId: oi.variant_id || undefined,
+              name: oi.product_name,
+              variant: oi.variant_label || undefined,
+              quantity: oi.quantity,
+              unitPrice: Number(oi.unit_price || 0),
+              lineTotal: Number(oi.line_total || 0),
+            });
+            itemsMap.set(oi.order_id, list);
+          });
+
+          const paymentsMapByOrder = new Map<string, any>();
+          (dbPayments || []).forEach((pay: any) => {
+            paymentsMapByOrder.set(pay.order_id, pay);
+          });
+
+          const mappedOrders: CustomerOrder[] = (dbOrders || []).map((o: any) => {
+            const payInfo = paymentsMapByOrder.get(o.id) || {};
+            const methodKey = payInfo.method_key || 'cod';
+            return {
+              id: o.order_code || o.id,
+              storeId: o.store_id,
+              buyerId: o.user_id || undefined,
+              customerName: o.customer_name,
+              phoneNumber: o.phone_number,
+              deliveryAddress: o.delivery_address,
+              notes: o.notes || undefined,
+              items: itemsMap.get(o.id) || [],
+              currency: o.currency || 'PHP',
+              subtotal: Number(o.subtotal || 0),
+              deliveryFee: Number(o.delivery_fee || 0),
+              taxAmount: Number(o.tax_amount || 0),
+              serviceChargeAmount: Number(o.service_charge_amount || 0),
+              grandTotal: Number(o.grand_total || 0),
+              paymentMethod: payInfo.method_label || (methodKey === 'gcash' ? 'GCash' : methodKey === 'maya' ? 'Maya' : methodKey === 'bank' ? 'Bank Transfer' : 'Cash on Delivery'),
+              paymentMethodKey: methodKey,
+              paymentStatus: payInfo.payment_status || 'unpaid',
+              paymentReferenceNumber: payInfo.reference_number || undefined,
+              paymentProofUrl: payInfo.payment_proof_url || undefined,
+              amountPaid: Number(payInfo.amount_paid || 0),
+              status: o.status,
+              createdAt: o.created_at,
+              updatedAt: o.updated_at,
+            };
+          });
+
+          const userEmailMap = new Map<string, { name: string; email: string }>();
+          (dbUsers || []).forEach((u: any) => userEmailMap.set(u.id, { name: u.name, email: u.email }));
+
+          const mappedSubs: SubscriptionTransaction[] = (dbSubs || []).map((sub: any) => {
+            const uInfo = userEmailMap.get(sub.user_id) || { name: 'Merchant', email: '' };
+            return {
+              id: sub.id,
+              referenceId: sub.reference_id,
+              userId: sub.user_id,
+              userName: uInfo.name,
+              userEmail: uInfo.email,
+              planId: sub.plan_id,
+              amount: Number(sub.amount || 0),
+              paymentMethod: sub.payment_method,
+              status: sub.status,
+              dueDate: sub.due_date || undefined,
+              periodStart: sub.period_start || undefined,
+              periodEnd: sub.period_end || undefined,
+              proofUrl: sub.proof_url || undefined,
+              approvedBy: sub.approved_by || undefined,
+              approvedAt: sub.approved_at || undefined,
+              createdAt: sub.created_at,
+              updatedAt: sub.updated_at,
+            };
+          });
+
+          const mappedChannels: PlatformPaymentChannel[] = (dbChannels || []).map((ch: any) => ({
+            id: ch.id,
+            type: ch.channel_type || 'ewallet',
+            label: ch.label,
+            subtitle: ch.subtitle || '',
+            enabled: Boolean(ch.is_enabled),
+            requiresReceipt: Boolean(ch.requires_receipt),
+            accountName: ch.account_name,
+            numberLabel: ch.number_label || 'Account Number',
+            accountNumber: ch.account_number,
+            note: ch.note || undefined,
+            qrImageUrl: ch.qr_image_url || undefined,
+            sortOrder: ch.sort_order || 0,
+          }));
+
+          const mappedNotifications: AppNotification[] = (dbNotifications || []).map((n: any) => ({
+            id: n.id,
+            userId: n.user_id,
+            storeId: n.store_id || undefined,
+            orderId: n.order_id || undefined,
+            subscriptionId: n.subscription_id || undefined,
+            notificationKey: n.notification_key || undefined,
+            category: n.category,
+            title: n.title,
+            message: n.message,
+            targetPath: n.target_path,
+            isRead: Boolean(n.is_read),
+            readAt: n.read_at || undefined,
+            isDismissed: Boolean(n.is_dismissed),
+            dismissedAt: n.dismissed_at || undefined,
+            createdAt: n.created_at,
+            updatedAt: n.updated_at,
+          }));
+
+          const mappedBuyers: BuyerAccount[] = (dbUsers || [])
+            .filter((u: any) => u.role_id === 3)
+            .map((u: any) => ({
+              id: u.id,
+              name: u.name,
+              email: u.email,
+              role: Roles.Buyer,
+              roleId: 3 as const,
+              storeId: u.registered_store_id || undefined,
+              savedCheckoutInfo:
+                u.phone_number || u.address
+                  ? {
+                      fullName: u.name,
+                      phoneNumber: u.phone_number || '',
+                      deliveryAddress: u.address || '',
+                      notes: u.delivery_notes || undefined,
+                      preferredPaymentMethod: u.preferred_payment_method || undefined,
+                      updatedAt: u.checkout_info_updated_at || u.updated_at || u.created_at,
+                    }
+                  : undefined,
+              createdAt: u.created_at,
+              updatedAt: u.updated_at,
+            }));
+
+          const { data: sessionData } = await client!.auth.getSession();
+          const sessionUserId = sessionData?.session?.user?.id;
+          const currentSessionUser = sessionUserId
+            ? mappedUsers.find((u) => u.id === sessionUserId) || null
+            : null;
+          const currentSessionBuyer = sessionUserId
+            ? mappedBuyers.find((b) => b.id === sessionUserId) || null
+            : null;
+
+          setState((prev) => ({
+            ...prev,
+            users: mappedUsers,
+            buyers: mappedBuyers,
+            stores: mappedStores,
+            products: mappedProducts,
+            paymentSettingsByStore,
+            placedOrders: mappedOrders,
+            subscriptionTransactions: mappedSubs,
+            platformPaymentSettings: {
+              channels: mappedChannels.length > 0 ? mappedChannels : (prev.platformPaymentSettings?.channels || []),
+              updatedAt: new Date().toISOString(),
+            },
+            notifications: mappedNotifications,
+            currentUser: currentSessionUser && (currentSessionUser.role === Roles.Admin || currentSessionUser.role === Roles.Seller) ? currentSessionUser : null,
+            currentBuyer: currentSessionBuyer,
+          }));
+        } catch (err) {
+          console.error('Error hydrating from Supabase:', err);
         }
       }
-    };
-    window.addEventListener('storage', handleStorage);
-    return () => window.removeEventListener('storage', handleStorage);
-  }, []);
+
+      hydrateFromSupabase();
+
+      const { data: authListener } = client.auth.onAuthStateChange((event, session) => {
+        if (event === 'SIGNED_OUT' || !session) {
+          setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
+        }
+      });
+
+      return () => {
+        authListener?.subscription?.unsubscribe();
+      };
+    }, []);
 
   const navigate = useCallback(
     (next: AppRoute, options?: { replace?: boolean }) => {
@@ -424,12 +666,27 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [dismissToast]
   );
 
+  const notifySync = useCallback(
+    (promise: Promise<{ success: boolean; error?: string }>) => {
+      promise.then((res) => {
+        if (!res.success && res.error) {
+          pushToast({
+            type: 'error',
+            title: 'Database Error',
+            description: res.error,
+          });
+        }
+      });
+    },
+    [pushToast]
+  );
+
   const signUpUser = useCallback(
-    (
+    async (
       name: string,
       email: string,
       password: string
-    ): { success: boolean; user?: User; error?: string } => {
+    ): Promise<{ success: boolean; user?: User; error?: string }> => {
       const cleanName = name.trim();
       const normalizedEmail = email.trim().toLowerCase();
 
@@ -443,153 +700,358 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         return { success: false, error: 'Password must be at least 6 characters.' };
       }
 
-      const existingUser = (state.users ?? []).find(
-        (u) => u.email.toLowerCase() === normalizedEmail
-      );
-      const existingBuyer = (state.buyers ?? []).find(
-        (b) => b.email.toLowerCase() === normalizedEmail
-      );
-      if (existingUser || existingBuyer) {
+      const configStatus = getSupabaseConfigStatus();
+      if (!configStatus.configured) {
+        return { success: false, error: configStatus.reason };
+      }
+
+      const client = getSupabaseClient();
+      if (!client) {
         return {
           success: false,
-          error: 'An account with this email already exists. Please sign in.',
+          error: 'Hindi ma-initialize ang database connection. Pakisuri ang configuration.',
         };
       }
 
-      const now = new Date().toISOString();
-      const newUser: User = {
-        id: generateId('usr'),
-        name: cleanName,
-        email: normalizedEmail,
-        password,
-        role: Roles.Seller,
-        roleId: 2,
-        plan: 'starter',
-        status: 'active',
-        lastActiveAt: now,
-        createdAt: now,
-        updatedAt: now,
-      };
+      try {
+        const { data: authData, error: authError } = await client.auth.signUp({
+          email: normalizedEmail,
+          password,
+          options: {
+            data: {
+              name: cleanName,
+              account_type: 'seller',
+            },
+          },
+        });
 
-      setState((prev) => ({
-        ...prev,
-        currentUser: newUser,
-        users: [newUser, ...(prev.users ?? [])],
-      }));
+        if (authError) {
+          return { success: false, error: `Database Error: ${authError.message}` };
+        }
 
-      syncUserToSupabase(newUser);
-      return { success: true, user: newUser };
+        if (!authData.user?.id) {
+          return { success: false, error: 'Failed to create user in Supabase database.' };
+        }
+
+        const authId = authData.user.id;
+        const now = new Date().toISOString();
+
+        // Ensure user row exists in public.users table
+        const userRow = {
+          id: authId,
+          role_id: 2, // seller
+          name: cleanName,
+          email: normalizedEmail,
+          plan: 'starter',
+          status: 'active',
+          last_active_at: now,
+          created_at: now,
+          updated_at: now,
+        };
+
+        const { error: dbError } = await client
+          .from('users')
+          .upsert(userRow as any, { onConflict: 'id' });
+        if (dbError) {
+          console.error('Supabase users table insert error:', dbError);
+          if (authData.session) {
+            await client.auth.signOut();
+            return {
+              success: false,
+              error: `Database Error (public.users): ${dbError.message}`,
+            };
+          }
+        }
+
+        const newUser: User = {
+          id: authId,
+          name: cleanName,
+          email: normalizedEmail,
+          role: Roles.Seller,
+          roleId: 2,
+          plan: 'starter',
+          status: 'active',
+          lastActiveAt: now,
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        setState((prev) => ({
+          ...prev,
+          currentUser: newUser,
+          users: [newUser, ...(prev.users ?? []).filter((u) => u.id !== newUser.id)],
+        }));
+
+        if (authData.session === null) {
+          pushToast({
+            type: 'info',
+            title: 'Supabase email confirmation',
+            description:
+              'Account created! If confirmation is required, check your email inbox to verify.',
+          });
+        }
+
+        return { success: true, user: newUser };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: `Database connection error: ${err?.message || 'Unable to sign up.'}`,
+        };
+      }
     },
-    [state.buyers, state.users]
+    [pushToast]
   );
 
   const signInUser = useCallback(
-    (
+    async (
       email: string,
       password: string
-    ): { success: boolean; user?: User; error?: string } => {
+    ): Promise<{ success: boolean; user?: User; error?: string }> => {
       const normalizedEmail = email.trim().toLowerCase();
       if (!normalizedEmail || !EMAIL_REGEX.test(normalizedEmail)) {
         return { success: false, error: 'Please enter a valid email address.' };
       }
-      const matched = (state.users ?? []).find(
-        (u) => u.email.toLowerCase() === normalizedEmail
-      );
-      if (!matched) {
-        return {
-          success: false,
-          error: 'No account found with this email. Create an account or connect your database.',
-        };
-      }
-      if (matched.password && matched.password !== password) {
-        return { success: false, error: 'Incorrect email or password.' };
+      if (!password) {
+        return { success: false, error: 'Please enter your password.' };
       }
 
-      const updatedUser: User = {
-        ...matched,
-        lastActiveAt: new Date().toISOString(),
-      };
-      setState((prev) => ({
-        ...prev,
-        currentUser: updatedUser,
-        users: (prev.users ?? []).map((u) => (u.id === updatedUser.id ? updatedUser : u)),
-      }));
-      return { success: true, user: updatedUser };
+      const configStatus = getSupabaseConfigStatus();
+      if (!configStatus.configured) {
+        return { success: false, error: configStatus.reason };
+      }
+
+      const client = getSupabaseClient();
+      if (!client) {
+        return {
+          success: false,
+          error: 'Hindi ma-initialize ang database connection. Pakisuri ang configuration.',
+        };
+      }
+
+      try {
+        const { data: authData, error: authError } = await client.auth.signInWithPassword({
+          email: normalizedEmail,
+          password,
+        });
+
+        if (authError) {
+          return { success: false, error: `Supabase Error: ${authError.message}` };
+        }
+
+        if (!authData.user?.id) {
+          return { success: false, error: 'No user record returned from Supabase database.' };
+        }
+
+        const authId = authData.user.id;
+        const { data: dbUser, error: dbErr } = await client
+          .from('users')
+          .select('*')
+          .eq('id', authId)
+          .maybeSingle();
+
+        if (dbErr) {
+          return { success: false, error: `Database Error: ${dbErr.message}` };
+        }
+
+        const now = new Date().toISOString();
+        let activeUser: User;
+
+        if (dbUser) {
+          activeUser = {
+            id: dbUser.id,
+            name: dbUser.name || authData.user.user_metadata?.name || normalizedEmail.split('@')[0],
+            email: dbUser.email || normalizedEmail,
+            role:
+              dbUser.role_id === 1 ? Roles.Admin : dbUser.role_id === 2 ? Roles.Seller : Roles.Buyer,
+            roleId: dbUser.role_id,
+            plan: dbUser.plan || 'starter',
+            status: dbUser.status || 'active',
+            restrictedReason: dbUser.restricted_reason || undefined,
+            cancelAtPeriodEnd: dbUser.cancel_at_period_end || false,
+            planPeriodEndsAt: dbUser.plan_period_ends_at || undefined,
+            phoneNumber: dbUser.phone_number || undefined,
+            address: dbUser.address || undefined,
+            deliveryNotes: dbUser.delivery_notes || undefined,
+            preferredPaymentMethod: dbUser.preferred_payment_method || undefined,
+            checkoutInfoUpdatedAt: dbUser.checkout_info_updated_at || undefined,
+            registeredStoreId: dbUser.registered_store_id || undefined,
+            lastActiveAt: now,
+            createdAt: dbUser.created_at || now,
+            updatedAt: dbUser.updated_at || now,
+          };
+          client.from('users').update({ last_active_at: now }).eq('id', authId).then();
+        } else {
+          const displayName = authData.user.user_metadata?.name || normalizedEmail.split('@')[0];
+          activeUser = {
+            id: authId,
+            name: displayName,
+            email: normalizedEmail,
+            role: Roles.Seller,
+            roleId: 2,
+            plan: 'starter',
+            status: 'active',
+            lastActiveAt: now,
+            createdAt: now,
+            updatedAt: now,
+          };
+          await client.from('users').upsert(toDbUserRow(activeUser) as any, { onConflict: 'id' });
+        }
+
+        setState((prev) => ({
+          ...prev,
+          currentUser: activeUser,
+          users: [activeUser, ...(prev.users ?? []).filter((u) => u.id !== activeUser.id)],
+        }));
+
+        return { success: true, user: activeUser };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: `Database connection error: ${err?.message || 'Sign in failed.'}`,
+        };
+      }
     },
-    [state.users]
+    []
   );
 
   const signInAdminUser = useCallback(
-    (email: string, password: string): { success: boolean; error?: string } => {
+    async (email: string, password: string): Promise<{ success: boolean; error?: string }> => {
       const normalizedEmail = email.trim().toLowerCase();
       if (!normalizedEmail || !EMAIL_REGEX.test(normalizedEmail)) {
         return { success: false, error: 'Please enter a valid admin email address.' };
       }
+      if (!password) {
+        return { success: false, error: 'Please enter your admin password.' };
+      }
 
-      const matchedAdmin = (state.users ?? []).find(
-        (u) => u.email.toLowerCase() === normalizedEmail && u.role === Roles.Admin
-      );
+      const configStatus = getSupabaseConfigStatus();
+      if (!configStatus.configured) {
+        return { success: false, error: configStatus.reason };
+      }
 
-      if (!matchedAdmin) {
+      const client = getSupabaseClient();
+      if (!client) {
         return {
           success: false,
-          error: 'No administrator account found. Seed an admin account in your database first.',
+          error: 'Hindi ma-initialize ang database connection. Pakisuri ang configuration.',
         };
       }
-      if (matchedAdmin.password && matchedAdmin.password !== password) {
-        return { success: false, error: 'Incorrect password for admin account.' };
+
+      try {
+        const { data: authData, error: authError } = await client.auth.signInWithPassword({
+          email: normalizedEmail,
+          password,
+        });
+
+        if (authError) {
+          return { success: false, error: `Supabase Auth Error: ${authError.message}` };
+        }
+
+        if (!authData.user?.id) {
+          return { success: false, error: 'Walang naibalik na user record mula sa Supabase database.' };
+        }
+
+        const authId = authData.user.id;
+        const { data: dbUser, error: dbErr } = await client
+          .from('users')
+          .select('*')
+          .eq('id', authId)
+          .maybeSingle();
+
+        if (dbErr) {
+          return { success: false, error: `Database Error: ${dbErr.message}` };
+        }
+
+        if (!dbUser || dbUser.role_id !== 1) {
+          await client.auth.signOut();
+          return {
+            success: false,
+            error:
+              'Access denied: Hindi administrator account ang credentials na ito (kailangang role_id = 1 sa public.users table sa Supabase).',
+          };
+        }
+
+        const now = new Date().toISOString();
+        const adminUser: User = {
+          id: dbUser.id,
+          name: dbUser.name || 'Admin',
+          email: dbUser.email || normalizedEmail,
+          role: Roles.Admin,
+          roleId: 1,
+          plan: 'pro',
+          status: 'active',
+          lastActiveAt: now,
+          createdAt: dbUser.created_at || now,
+          updatedAt: dbUser.updated_at || now,
+        };
+
+        client.from('users').update({ last_active_at: now }).eq('id', authId).then();
+
+        setState((prev) => ({
+          ...prev,
+          currentUser: adminUser,
+          users: [adminUser, ...(prev.users ?? []).filter((u) => u.id !== adminUser.id)],
+        }));
+
+        return { success: true };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: `Admin login error: ${err?.message || 'Failed to authenticate admin account.'}`,
+        };
       }
-
-      const updatedAdmin: User = {
-        ...matchedAdmin,
-        lastActiveAt: new Date().toISOString(),
-      };
-
-      setState((prev) => ({
-        ...prev,
-        currentUser: updatedAdmin,
-        users: (prev.users ?? []).map((u) => (u.id === updatedAdmin.id ? updatedAdmin : u)),
-      }));
-
-      return { success: true };
     },
-    [state.users]
+    []
   );
 
-  const resetUserPassword = useCallback((email: string, newPassword: string): boolean => {
-    const cleanEmail = email.trim().toLowerCase();
-    if (!cleanEmail || !newPassword || newPassword.length < 6) return false;
-    const now = new Date().toISOString();
-    let updated = false;
-    setState((prev) => ({
-      ...prev,
-      users: (prev.users ?? []).map((u) => {
-        if (u.email.toLowerCase() === cleanEmail && u.role !== Roles.Buyer) {
-          updated = true;
-          return { ...u, password: newPassword, updatedAt: now };
+  const resetUserPassword = useCallback(
+    async (email: string, newPassword: string): Promise<{ success: boolean; error?: string }> => {
+      const cleanEmail = email.trim().toLowerCase();
+      if (!cleanEmail || !newPassword || newPassword.length < 6) {
+        return { success: false, error: 'Password must be at least 6 characters.' };
+      }
+
+      const configStatus = getSupabaseConfigStatus();
+      if (!configStatus.configured) {
+        return { success: false, error: configStatus.reason };
+      }
+
+      const client = getSupabaseClient();
+      if (!client) {
+        return { success: false, error: 'Database client not initialized.' };
+      }
+
+      try {
+        const { error } = await client.auth.updateUser({ password: newPassword });
+        if (error) {
+          return { success: false, error: error.message };
         }
-        return u;
-      }),
-      currentUser:
-        prev.currentUser && prev.currentUser.email.toLowerCase() === cleanEmail
-          ? { ...prev.currentUser, password: newPassword, updatedAt: now }
-          : prev.currentUser,
-    }));
-    return updated;
-  }, []);
+        return { success: true };
+      } catch (err: any) {
+        return { success: false, error: err?.message || 'Password update failed.' };
+      }
+    },
+    []
+  );
 
   const signOut = useCallback(() => {
+    if (isSupabaseConfigured) {
+      const client = getSupabaseClient();
+      if (client) {
+        client.auth.signOut().catch((err) => console.error('Supabase sign-out error:', err));
+      }
+    }
     setState((prev) => ({ ...prev, currentUser: null }));
   }, []);
 
   const buyerSignUp = useCallback(
-    (input: {
+    async (input: {
       name: string;
       email: string;
       password: string;
       storeId?: string;
       storeName?: string;
-    }): { success: boolean; buyer?: BuyerAccount; error?: string } => {
+    }): Promise<{ success: boolean; buyer?: BuyerAccount; error?: string }> => {
       const cleanName = input.name.trim();
       const cleanEmail = input.email.trim().toLowerCase();
 
@@ -599,96 +1061,232 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       if (!cleanEmail || !EMAIL_REGEX.test(cleanEmail)) {
         return { success: false, error: 'Please enter a valid email address.' };
       }
-      const existingUserAccount = (state.users ?? []).find(
-        (u) => u.email.toLowerCase() === cleanEmail
-      );
-      if (existingUserAccount?.role === Roles.Admin) {
-        return { success: false, error: 'This email address is reserved.' };
-      }
       if (!input.password || input.password.length < 6) {
         return { success: false, error: 'Password must be at least 6 characters.' };
       }
 
-      const existing = (state.buyers ?? []).find(
-        (b) => b.email.toLowerCase() === cleanEmail
-      );
-      if (existing || existingUserAccount) {
+      const configStatus = getSupabaseConfigStatus();
+      if (!configStatus.configured) {
+        return { success: false, error: configStatus.reason };
+      }
+
+      const client = getSupabaseClient();
+      if (!client) {
         return {
           success: false,
-          error: 'An account with this email address already exists. Please sign in.',
+          error: 'Hindi ma-initialize ang database connection. Pakisuri ang configuration.',
         };
       }
 
-      const now = new Date().toISOString();
-      const newBuyer: BuyerAccount = {
-        id: generateId('buy'),
-        name: cleanName,
-        email: cleanEmail,
-        password: input.password,
-        role: Roles.Buyer,
-        roleId: 3,
-        storeId: input.storeId,
-        storeName: input.storeName,
-        createdAt: now,
-        updatedAt: now,
-      };
+      try {
+        const { data: authData, error: authError } = await client.auth.signUp({
+          email: cleanEmail,
+          password: input.password,
+          options: {
+            data: {
+              name: cleanName,
+              account_type: 'buyer',
+              registered_store_id: input.storeId || null,
+            },
+          },
+        });
 
-      setState((prev) => ({
-        ...prev,
-        buyers: [...(prev.buyers ?? []), newBuyer],
-        currentBuyer: newBuyer,
-      }));
-      syncUserToSupabase(newBuyer);
-      return { success: true, buyer: newBuyer };
+        if (authError) {
+          return { success: false, error: `Supabase Error: ${authError.message}` };
+        }
+
+        if (!authData.user?.id) {
+          return { success: false, error: 'Failed to create buyer account in database.' };
+        }
+
+        const authId = authData.user.id;
+        const now = new Date().toISOString();
+
+        const buyerRow = {
+          id: authId,
+          role_id: 3, // buyer
+          name: cleanName,
+          email: cleanEmail,
+          status: 'active',
+          registered_store_id: input.storeId || null,
+          last_active_at: now,
+          created_at: now,
+          updated_at: now,
+        };
+
+        const { error: dbError } = await client
+          .from('users')
+          .upsert(buyerRow as any, { onConflict: 'id' });
+        if (dbError) {
+          console.error('Supabase buyer insert error:', dbError);
+          if (authData.session) {
+            await client.auth.signOut();
+            return {
+              success: false,
+              error: `Database Error (public.users): ${dbError.message}`,
+            };
+          }
+        }
+
+        const newBuyer: BuyerAccount = {
+          id: authId,
+          name: cleanName,
+          email: cleanEmail,
+          role: Roles.Buyer,
+          roleId: 3,
+          storeId: input.storeId,
+          storeName: input.storeName,
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        setState((prev) => ({
+          ...prev,
+          buyers: [...(prev.buyers ?? []).filter((b) => b.id !== authId), newBuyer],
+          currentBuyer: newBuyer,
+        }));
+
+        return { success: true, buyer: newBuyer };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: `Database connection error: ${err?.message || 'Failed to sign up buyer.'}`,
+        };
+      }
     },
-    [state.buyers, state.users]
+    []
   );
 
   const buyerSignIn = useCallback(
-    (
+    async (
       email: string,
       password: string
-    ): { success: boolean; buyer?: BuyerAccount; error?: string } => {
+    ): Promise<{ success: boolean; buyer?: BuyerAccount; error?: string }> => {
       const cleanEmail = email.trim().toLowerCase();
       if (!cleanEmail || !EMAIL_REGEX.test(cleanEmail)) {
         return { success: false, error: 'Please enter a valid email address.' };
       }
-      const found = (state.buyers ?? []).find(
-        (b) => b.email.toLowerCase() === cleanEmail && b.role === Roles.Buyer
-      );
-      if (!found) {
-        return { success: false, error: 'No buyer account found with this email address.' };
+      if (!password) {
+        return { success: false, error: 'Please enter your password.' };
       }
-      if (found.password !== password) {
-        return { success: false, error: 'Incorrect password. Please try again.' };
+
+      const configStatus = getSupabaseConfigStatus();
+      if (!configStatus.configured) {
+        return { success: false, error: configStatus.reason };
       }
-      setState((prev) => ({
-        ...prev,
-        currentBuyer: found,
-      }));
-      return { success: true, buyer: found };
+
+      const client = getSupabaseClient();
+      if (!client) {
+        return {
+          success: false,
+          error: 'Hindi ma-initialize ang database connection. Pakisuri ang configuration.',
+        };
+      }
+
+      try {
+        const { data: authData, error: authError } = await client.auth.signInWithPassword({
+          email: cleanEmail,
+          password,
+        });
+
+        if (authError) {
+          return { success: false, error: `Supabase Error: ${authError.message}` };
+        }
+
+        if (!authData.user?.id) {
+          return { success: false, error: 'No user record returned from Supabase.' };
+        }
+
+        const authId = authData.user.id;
+        const { data: dbUser, error: dbErr } = await client
+          .from('users')
+          .select('*')
+          .eq('id', authId)
+          .maybeSingle();
+
+        if (dbErr) {
+          return { success: false, error: `Database Error: ${dbErr.message}` };
+        }
+
+        const now = new Date().toISOString();
+        const buyer: BuyerAccount = {
+          id: authId,
+          name: dbUser?.name || authData.user.user_metadata?.name || cleanEmail.split('@')[0],
+          email: dbUser?.email || cleanEmail,
+          role: Roles.Buyer,
+          roleId: dbUser?.role_id ?? 3,
+          storeId: dbUser?.registered_store_id || undefined,
+          savedCheckoutInfo:
+            dbUser?.phone_number || dbUser?.address
+              ? {
+                  fullName: dbUser.name,
+                  phoneNumber: dbUser.phone_number || '',
+                  deliveryAddress: dbUser.address || '',
+                  notes: dbUser.delivery_notes || undefined,
+                  preferredPaymentMethod: dbUser.preferred_payment_method || undefined,
+                  updatedAt: dbUser.checkout_info_updated_at || now,
+                }
+              : undefined,
+          createdAt: dbUser?.created_at || now,
+          updatedAt: dbUser?.updated_at || now,
+        };
+
+        client.from('users').update({ last_active_at: now }).eq('id', authId).then();
+
+        setState((prev) => ({
+          ...prev,
+          currentBuyer: buyer,
+          buyers: [...(prev.buyers ?? []).filter((b) => b.id !== authId), buyer],
+        }));
+
+        return { success: true, buyer };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: `Database connection error: ${err?.message || 'Failed to sign in buyer.'}`,
+        };
+      }
     },
-    [state.buyers]
+    []
   );
 
-  const buyerResetPassword = useCallback((email: string, newPassword: string) => {
-    const cleanEmail = email.trim().toLowerCase();
-    if (!cleanEmail) return;
-    setState((prev) => ({
-      ...prev,
-      buyers: (prev.buyers ?? []).map((b) =>
-        b.email.toLowerCase() === cleanEmail && b.role === Roles.Buyer
-          ? { ...b, password: newPassword }
-          : b
-      ),
-      currentBuyer:
-        prev.currentBuyer && prev.currentBuyer.email.toLowerCase() === cleanEmail
-          ? { ...prev.currentBuyer, password: newPassword }
-          : prev.currentBuyer,
-    }));
-  }, []);
+  const buyerResetPassword = useCallback(
+    async (email: string, newPassword: string): Promise<{ success: boolean; error?: string }> => {
+      const cleanEmail = email.trim().toLowerCase();
+      if (!cleanEmail || !newPassword || newPassword.length < 6) {
+        return { success: false, error: 'Password must be at least 6 characters.' };
+      }
+
+      const configStatus = getSupabaseConfigStatus();
+      if (!configStatus.configured) {
+        return { success: false, error: configStatus.reason };
+      }
+
+      const client = getSupabaseClient();
+      if (!client) {
+        return { success: false, error: 'Database client not initialized.' };
+      }
+
+      try {
+        const { error } = await client.auth.updateUser({ password: newPassword });
+        if (error) {
+          return { success: false, error: error.message };
+        }
+        return { success: true };
+      } catch (err: any) {
+        return { success: false, error: err?.message || 'Password update failed.' };
+      }
+    },
+    []
+  );
 
   const buyerSignOut = useCallback(() => {
+    if (isSupabaseConfigured) {
+      const client = getSupabaseClient();
+      if (client) {
+        client.auth.signOut().catch((err) => console.error('Supabase buyer sign-out error:', err));
+      }
+    }
     setState((prev) => ({ ...prev, currentBuyer: null }));
   }, []);
 
@@ -717,13 +1315,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       };
 
       const now = new Date().toISOString();
+      const updatedBuyer: BuyerAccount = {
+        ...state.currentBuyer,
+        savedCheckoutInfo: saved,
+        updatedAt: now,
+      };
       setState((prev) => {
         if (!prev.currentBuyer) return prev;
-        const updatedBuyer: BuyerAccount = {
-          ...prev.currentBuyer,
-          savedCheckoutInfo: saved,
-          updatedAt: now,
-        };
         return {
           ...prev,
           currentBuyer: updatedBuyer,
@@ -731,9 +1329,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         };
       });
 
+      syncUserToSupabase(updatedBuyer).then((res) => {
+        if (!res.success && res.error) {
+          pushToast({
+            type: 'error',
+            title: 'Database Sync Error',
+            description: res.error,
+          });
+        }
+      });
+
       return saved;
     },
-    [state.currentBuyer]
+    [pushToast, state.currentBuyer]
   );
 
   const clearBuyerCheckoutInfo = useCallback(() => {
@@ -745,13 +1353,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         savedCheckoutInfo: undefined,
         updatedAt: now,
       };
+      syncUserToSupabase(clearedBuyer).then((res) => {
+        if (!res.success && res.error) {
+          pushToast({
+            type: 'error',
+            title: 'Database Sync Error',
+            description: res.error,
+          });
+        }
+      });
       return {
         ...prev,
         currentBuyer: clearedBuyer,
         buyers: (prev.buyers ?? []).map((b) => (b.id === clearedBuyer.id ? clearedBuyer : b)),
       };
     });
-  }, []);
+  }, [pushToast]);
 
   const updateUserProfile = useCallback(
     (
@@ -763,6 +1380,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setState((prev) => {
         if (!prev.currentUser) return prev;
         const updatedUser: User = { ...prev.currentUser, ...updates, updatedAt: now };
+        syncUserToSupabase(updatedUser).then((res) => {
+          if (!res.success && res.error) {
+            pushToast({
+              type: 'error',
+              title: 'Database Sync Error',
+              description: res.error,
+            });
+          }
+        });
         return {
           ...prev,
           currentUser: updatedUser,
@@ -770,7 +1396,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         };
       });
     },
-    []
+    [pushToast]
   );
 
   const setActiveStore = useCallback((storeId: string | null) => {
@@ -883,12 +1509,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         activeStoreId: newStoreId,
       }));
 
-      syncStoreToSupabase(newStore);
-      syncPaymentSettingsToSupabase(createDefaultPaymentSettings(newStoreId));
+      notifySync(syncStoreToSupabase(newStore));
+      notifySync(syncPaymentSettingsToSupabase(createDefaultPaymentSettings(newStoreId)));
 
       return { store: newStore };
     },
-    [state.currentUser?.id, state.currentUser?.plan, state.currentUser?.role, state.currentUser?.status, state.stores]
+    [notifySync, state.currentUser?.id, state.currentUser?.plan, state.currentUser?.role, state.currentUser?.status, state.stores]
   );
 
   const updateStoreMeta = useCallback(
@@ -945,34 +1571,32 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       }
 
       const now = new Date().toISOString();
+      const updatedStore = {
+        ...target,
+        name: updates.name !== undefined ? updates.name.trim() : target.name,
+        slug: nextSlug,
+        domainUrl: buildStoreDomainUrl(nextSlug),
+        status: updates.status ?? target.status,
+        templateId: updates.templateId ?? target.templateId,
+        updatedAt: now,
+      };
+
       setState((prev) => ({
         ...prev,
-        stores: prev.stores.map((s) =>
-          s.id === storeId
-            ? {
-                ...s,
-                name: updates.name !== undefined ? updates.name.trim() : s.name,
-                slug: nextSlug,
-                domainUrl: buildStoreDomainUrl(nextSlug),
-                status: updates.status ?? s.status,
-                templateId: updates.templateId ?? s.templateId,
-                updatedAt: now,
-              }
-            : s
-        ),
+        stores: prev.stores.map((s) => (s.id === storeId ? updatedStore : s)),
       }));
 
+      notifySync(syncStoreToSupabase(updatedStore));
       return { success: true };
     },
-    [state.currentUser?.plan, state.currentUser?.role, state.stores]
+    [notifySync, state.currentUser?.plan, state.currentUser?.role, state.stores]
   );
 
   const updateStoreBranding = useCallback(
     (storeId: string, brandingUpdates: Partial<StoreBranding>) => {
       const now = new Date().toISOString();
-      setState((prev) => ({
-        ...prev,
-        stores: prev.stores.map((s) =>
+      setState((prev) => {
+        const nextStores = prev.stores.map((s) =>
           s.id === storeId
             ? {
                 ...s,
@@ -980,10 +1604,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                 updatedAt: now,
               }
             : s
-        ),
-      }));
+        );
+        const updated = nextStores.find((s) => s.id === storeId);
+        if (updated) {
+          notifySync(syncStoreToSupabase(updated));
+        }
+        return {
+          ...prev,
+          stores: nextStores,
+        };
+      });
     },
-    []
+    [notifySync]
   );
 
   const deleteStore = useCallback((storeId: string) => {
@@ -1003,6 +1635,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           prev.activeStoreId === storeId ? nextStores[0]?.id ?? null : prev.activeStoreId,
       };
     });
+    if (isSupabaseConfigured) {
+      const client = getSupabaseClient();
+      if (client) {
+        client.from('stores').delete().eq('id', storeId).then();
+      }
+    }
   }, []);
 
   const getStoreBySlug = useCallback(
@@ -1083,10 +1721,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         products: [product, ...prev.products],
       }));
 
-      syncProductToSupabase(product);
+      notifySync(syncProductToSupabase(product));
       return product;
     },
-    [state.products]
+    [notifySync, state.products]
   );
 
   const updateProduct = useCallback(
@@ -1151,12 +1789,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             finalPrice: clampNonNegative(smart.finalPrice),
             updatedAt: now,
           };
-          syncProductToSupabase(updated);
+          notifySync(syncProductToSupabase(updated));
           return updated;
         }),
       }));
     },
-    []
+    [notifySync]
   );
 
   const deleteProduct = useCallback((productId: string) => {
@@ -1164,6 +1802,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       ...prev,
       products: prev.products.filter((p) => p.id !== productId),
     }));
+    if (isSupabaseConfigured) {
+      const client = getSupabaseClient();
+      if (client) {
+        client.from('store_products').delete().eq('id', productId).then();
+      }
+    }
   }, []);
 
   const getPaymentSettings = useCallback(
@@ -1192,7 +1836,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           ),
           updatedAt: now,
         };
-        syncPaymentSettingsToSupabase(merged);
+        notifySync(syncPaymentSettingsToSupabase(merged));
         return {
           ...prev,
           paymentSettingsByStore: {
@@ -1202,7 +1846,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         };
       });
     },
-    []
+    [notifySync]
   );
 
   const getStoreOrders = useCallback(
@@ -1298,10 +1942,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           placedOrders: [newOrder, ...(prev.placedOrders ?? [])],
         };
       });
-      syncOrderToSupabase(newOrder);
+      notifySync(syncOrderToSupabase(newOrder));
       return newOrder;
     },
-    [state.currentBuyer, state.paymentSettingsByStore, state.stores]
+    [notifySync, state.currentBuyer, state.paymentSettingsByStore, state.stores]
   );
 
   const updateOrderStatus = useCallback(
@@ -1381,8 +2025,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         ...prev,
         subscriptionTransactions: [tx, ...(prev.subscriptionTransactions ?? [])],
       }));
+      notifySync(syncSubscriptionToSupabase(tx));
     },
-    []
+    [notifySync]
   );
 
   const adminUpdateUser = useCallback(
@@ -1409,6 +2054,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           prev.currentUser?.id === userId
             ? { ...prev.currentUser, ...updates }
             : prev.currentUser;
+        const updated = nextUsers.find((u) => u.id === userId);
+        if (updated) {
+          notifySync(syncUserToSupabase(updated));
+        }
         return {
           ...prev,
           users: nextUsers,
@@ -1416,7 +2065,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         };
       });
     },
-    []
+    [notifySync]
   );
 
   const adminDeleteUser = useCallback((userId: string) => {
@@ -1446,6 +2095,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             : prev.activeStoreId,
       };
     });
+    if (isSupabaseConfigured) {
+      const client = getSupabaseClient();
+      if (client) {
+        client.from('users').delete().eq('id', userId).then();
+      }
+    }
   }, []);
 
   const adminUpdateStore = useCallback(
@@ -1475,32 +2130,31 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       }
 
       const now = new Date().toISOString();
+      const updatedStore: Store = {
+        ...target,
+        name: updates.name !== undefined ? updates.name.trim() : target.name,
+        slug: nextSlug,
+        domainUrl: buildStoreDomainUrl(nextSlug),
+        status: updates.status ?? target.status,
+        restrictedReason:
+          updates.status && updates.status !== 'restricted'
+            ? undefined
+            : updates.restrictedReason !== undefined
+              ? updates.restrictedReason
+              : target.restrictedReason,
+        templateId: updates.templateId ?? target.templateId,
+        updatedAt: now,
+      };
+
       setState((prev) => ({
         ...prev,
-        stores: prev.stores.map((s) =>
-          s.id === storeId
-            ? {
-                ...s,
-                name: updates.name !== undefined ? updates.name.trim() : s.name,
-                slug: nextSlug,
-                domainUrl: buildStoreDomainUrl(nextSlug),
-                status: updates.status ?? s.status,
-                restrictedReason:
-                  updates.status && updates.status !== 'restricted'
-                    ? undefined
-                    : updates.restrictedReason !== undefined
-                      ? updates.restrictedReason
-                      : s.restrictedReason,
-                templateId: updates.templateId ?? s.templateId,
-                updatedAt: now,
-              }
-            : s
-        ),
+        stores: prev.stores.map((s) => (s.id === storeId ? updatedStore : s)),
       }));
 
+      notifySync(syncStoreToSupabase(updatedStore));
       return { success: true };
     },
-    [state.stores]
+    [notifySync, state.stores]
   );
 
   const adminToggleSubscriptionTxStatus = useCallback(
@@ -1523,6 +2177,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
               }
             : tx
         );
+
+        const updatedTx = nextTransactions.find((t) => t.id === txId);
+        if (updatedTx) {
+          notifySync(syncSubscriptionToSupabase(updatedTx));
+        }
 
         if (!targetTx || status !== 'paid') {
           return {
@@ -1582,7 +2241,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         };
       });
     },
-    []
+    [notifySync]
   );
 
   const adminDeleteBuyer = useCallback((buyerId: string) => {
@@ -1591,6 +2250,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       buyers: (prev.buyers ?? []).filter((b) => b.id !== buyerId),
       currentBuyer: prev.currentBuyer?.id === buyerId ? null : prev.currentBuyer,
     }));
+    if (isSupabaseConfigured) {
+      const client = getSupabaseClient();
+      if (client) {
+        client.from('users').delete().eq('id', buyerId).then();
+      }
+    }
   }, []);
 
   const markNotificationsRead = useCallback((ids: string[]) => {
@@ -1646,7 +2311,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         updatedAt: nowIso,
       },
     }));
-  }, []);
+    notifySync(syncPlatformChannelsToSupabase(channels));
+  }, [notifySync]);
 
   const value = useMemo<StoreContextValue>(
     () => ({

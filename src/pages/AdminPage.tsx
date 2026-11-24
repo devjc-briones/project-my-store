@@ -7,6 +7,7 @@ import {
   Eye,
   EyeOff,
   LayoutGrid,
+  Loader2,
   Lock,
   LogOut,
   Mail,
@@ -115,6 +116,7 @@ export function AdminPage() {
   const [showAdminPass, setShowAdminPass] = useState(false);
   const [adminLoginError, setAdminLoginError] = useState<string | null>(null);
   const [shakeAdminForm, setShakeAdminForm] = useState(false);
+  const [isAdminLoggingIn, setIsAdminLoggingIn] = useState(false);
 
   const isAdminAuthenticated = state.currentUser?.role === Roles.Admin;
 
@@ -315,24 +317,38 @@ export function AdminPage() {
     navigate({ name: 'login', mode: 'signin' });
   };
 
-  const handleAdminGateSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleAdminGateSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const res = signInAdminUser(adminEmail, adminPassword);
-    if (!res.success) {
-      setAdminLoginError(res.error || 'Invalid admin credentials.');
-      setShakeAdminForm(false);
-      window.requestAnimationFrame(() => {
-        setShakeAdminForm(true);
-        window.setTimeout(() => setShakeAdminForm(false), 400);
+    if (isAdminLoggingIn) return;
+    setIsAdminLoggingIn(true);
+    try {
+      const res = await signInAdminUser(adminEmail, adminPassword);
+      setIsAdminLoggingIn(false);
+      if (!res.success) {
+        const errMsg = res.error || 'Invalid admin credentials.';
+        setAdminLoginError(errMsg);
+        pushToast({
+          type: 'error',
+          title: 'Admin Login Failed',
+          description: errMsg,
+        });
+        setShakeAdminForm(false);
+        window.requestAnimationFrame(() => {
+          setShakeAdminForm(true);
+          window.setTimeout(() => setShakeAdminForm(false), 400);
+        });
+        return;
+      }
+      setAdminLoginError(null);
+      pushToast({
+        type: 'success',
+        title: 'Admin signed in',
+        description: 'Welcome to the mystore Admin Console.',
       });
-      return;
+    } catch (err: any) {
+      setIsAdminLoggingIn(false);
+      setAdminLoginError(err?.message || 'Unable to connect to database.');
     }
-    setAdminLoginError(null);
-    pushToast({
-      type: 'success',
-      title: 'Admin signed in',
-      description: 'Welcome to the mystore Admin Console.',
-    });
   };
 
   if (!isAdminAuthenticated) {
@@ -438,14 +454,21 @@ export function AdminPage() {
             </div>
 
             {adminLoginError && (
-              <p className="text-xs font-medium text-rose-600 px-1">{adminLoginError}</p>
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs font-medium text-rose-700">
+                {adminLoginError}
+              </div>
             )}
 
             <button
               type="submit"
-              className="w-full min-h-[46px] py-3 px-4 bg-[#0f172a] hover:bg-slate-800 text-white text-sm font-semibold rounded-xl shadow-sm transition-colors cursor-pointer"
+              disabled={isAdminLoggingIn}
+              className="w-full min-h-[46px] py-3 px-4 bg-[#0f172a] hover:bg-slate-800 disabled:opacity-75 text-white text-sm font-semibold rounded-xl shadow-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
             >
-              Sign In to Admin
+              {isAdminLoggingIn ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                'Sign In to Admin'
+              )}
             </button>
           </form>
         </div>

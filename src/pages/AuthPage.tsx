@@ -21,6 +21,7 @@ import { Roles } from '../types/schema';
 interface SignInErrors {
   email?: string;
   password?: string;
+  form?: string;
 }
 
 interface SignUpErrors {
@@ -28,6 +29,7 @@ interface SignUpErrors {
   email?: string;
   password?: string;
   confirmPassword?: string;
+  form?: string;
 }
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -211,7 +213,7 @@ export function AuthPage() {
     });
   };
 
-  const handleSignInSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSignInSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (isSubmitting) return;
 
@@ -234,14 +236,24 @@ export function AuthPage() {
     setIsSubmitting(true);
     const cleanEmail = trimmedEmail.toLowerCase();
 
-    window.setTimeout(() => {
-      const result = signInUser(cleanEmail, signinPassword);
+    try {
+      const result = await signInUser(cleanEmail, signinPassword);
       setIsSubmitting(false);
       if (!result.success) {
         const message = result.error || 'Invalid email or password.';
-        setSigninErrors(
-          message.toLowerCase().includes('password') ? { password: message } : { email: message }
-        );
+        const lower = message.toLowerCase();
+        if (lower.includes('database') || lower.includes('supabase') || lower.includes('hindi nakakonekta') || lower.includes('vercel')) {
+          setSigninErrors({ form: message });
+          pushToast({
+            type: 'error',
+            title: 'Database Error',
+            description: message,
+          });
+        } else {
+          setSigninErrors(
+            lower.includes('password') ? { password: message } : { email: message }
+          );
+        }
         triggerShake('signin');
         return;
       }
@@ -262,10 +274,16 @@ export function AuthPage() {
         description: `Welcome back, ${result.user?.name ?? 'Merchant'}.`,
       });
       navigate({ name: 'dashboard' });
-    }, 300);
+    } catch (err: any) {
+      setIsSubmitting(false);
+      const message = err?.message || 'Unable to connect to database.';
+      setSigninErrors({ form: message });
+      pushToast({ type: 'error', title: 'Database Error', description: message });
+      triggerShake('signin');
+    }
   };
 
-  const handleSignUpSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSignUpSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (isSubmitting) return;
 
@@ -297,11 +315,22 @@ export function AuthPage() {
     setIsSubmitting(true);
     const cleanEmail = trimmedEmail.toLowerCase();
 
-    window.setTimeout(() => {
-      const result = signUpUser(trimmedName, cleanEmail, signupPassword);
+    try {
+      const result = await signUpUser(trimmedName, cleanEmail, signupPassword);
       setIsSubmitting(false);
       if (!result.success) {
-        setSignupErrors({ email: result.error || 'Unable to create account.' });
+        const message = result.error || 'Unable to create account.';
+        const lower = message.toLowerCase();
+        if (lower.includes('database') || lower.includes('supabase') || lower.includes('hindi nakakonekta') || lower.includes('vercel')) {
+          setSignupErrors({ form: message });
+          pushToast({
+            type: 'error',
+            title: 'Database Error',
+            description: message,
+          });
+        } else {
+          setSignupErrors({ email: message });
+        }
         triggerShake('signup');
         return;
       }
@@ -311,7 +340,13 @@ export function AuthPage() {
         description: `Welcome to mystore, ${trimmedName}.`,
       });
       navigate({ name: 'dashboard' });
-    }, 300);
+    } catch (err: any) {
+      setIsSubmitting(false);
+      const message = err?.message || 'Unable to connect to database.';
+      setSignupErrors({ form: message });
+      pushToast({ type: 'error', title: 'Database Error', description: message });
+      triggerShake('signup');
+    }
   };
 
   const handleRequestOtp = () => {
@@ -380,7 +415,7 @@ export function AuthPage() {
     setOtpVerified(true);
   };
 
-  const handleNewPasswordSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleNewPasswordSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (isResetting) return;
 
@@ -398,16 +433,19 @@ export function AuthPage() {
     setNewPassError(undefined);
     setIsResetting(true);
 
-    window.setTimeout(() => {
-      resetUserPassword(resetEmail.trim(), newPassword);
-      setIsResetting(false);
-      setResetSent(true);
-      pushToast({
-        type: 'success',
-        title: 'Password updated',
-        description: `You can now sign in to ${resetEmail.trim()} with your new password.`,
-      });
-    }, 450);
+    const res = await resetUserPassword(resetEmail.trim(), newPassword);
+    setIsResetting(false);
+    if (!res.success) {
+      setNewPassError(res.error || 'Failed to update password in database.');
+      triggerShake('reset');
+      return;
+    }
+    setResetSent(true);
+    pushToast({
+      type: 'success',
+      title: 'Password updated',
+      description: `You can now sign in to ${resetEmail.trim()} with your new password.`,
+    });
   };
 
   const passwordStrength = getPasswordStrength(signupPassword);
@@ -529,6 +567,11 @@ export function AuthPage() {
                     mode === 'signin' ? 'is-active' : 'is-inactive'
                   } ${shakeTarget === 'signin' ? 'auth-shake' : ''}`}
                 >
+                  {signinErrors.form && (
+                    <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs font-medium text-rose-700">
+                      {signinErrors.form}
+                    </div>
+                  )}
                   <div>
                     <label
                       htmlFor="signin-email"
@@ -663,6 +706,11 @@ export function AuthPage() {
                     mode === 'signup' ? 'is-active' : 'is-inactive'
                   } ${shakeTarget === 'signup' ? 'auth-shake' : ''}`}
                 >
+                  {signupErrors.form && (
+                    <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs font-medium text-rose-700">
+                      {signupErrors.form}
+                    </div>
+                  )}
                   <div>
                     <label
                       htmlFor="signup-name"

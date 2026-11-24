@@ -103,7 +103,7 @@ export interface BuyerAccount {
   id: string;
   name: string;
   email: string;
-  password: string;
+  password?: string;
   role: Roles;
   roleId?: RoleId;
   createdAt: string;
