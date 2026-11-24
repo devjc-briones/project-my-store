@@ -173,7 +173,7 @@ interface StoreContextValue {
     status?: SubscriptionTransaction['status'];
     dueDate?: string;
     proofUrl?: string;
-  }) => void;
+  }) => Promise<{ success: boolean; error?: string }>;
   adminUpdateUser: (
     userId: string,
     updates: Partial<
@@ -2152,7 +2152,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const recordSubscriptionPayment = useCallback(
-    (input: {
+    async (input: {
       userId: string;
       userName: string;
       userEmail: string;
@@ -2163,12 +2163,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       status?: SubscriptionTransaction['status'];
       dueDate?: string;
       proofUrl?: string;
-    }) => {
+    }): Promise<{ success: boolean; error?: string }> => {
       const nextStatus = input.status ?? 'paid';
       const nowIso = new Date().toISOString();
       const nextPeriodEndIso = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
       const tx: SubscriptionTransaction = {
-        id: generateId('tx_sub'),
+        id: generateUuid(),
         referenceId: input.referenceId ?? `SUB-${Date.now().toString().slice(-6)}`,
         userId: input.userId,
         userName: input.userName,
@@ -2185,13 +2185,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         createdAt: nowIso,
         updatedAt: nowIso,
       };
+      const res = await syncSubscriptionToSupabase(tx, true);
+      if (!res.success) {
+        pushToast({
+          type: 'error',
+          title: 'Database Error',
+          description: res.error || 'Failed to save subscription payment to database.',
+        });
+        return { success: false, error: res.error };
+      }
       setState((prev) => ({
         ...prev,
         subscriptionTransactions: [tx, ...(prev.subscriptionTransactions ?? [])],
       }));
-      notifySync(syncSubscriptionToSupabase(tx));
+      return { success: true };
     },
-    [notifySync]
+    [pushToast]
   );
 
   const adminUpdateUser = useCallback(

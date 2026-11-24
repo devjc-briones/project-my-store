@@ -156,15 +156,20 @@ export async function syncOrderToSupabase(order: CustomerOrder): Promise<{ succe
   }
 }
 
-export async function syncSubscriptionToSupabase(tx: SubscriptionTransaction): Promise<{ success: boolean; error?: string }> {
+export async function syncSubscriptionToSupabase(
+  tx: SubscriptionTransaction,
+  isNewInsert = false
+): Promise<{ success: boolean; error?: string }> {
   if (!isSupabaseConfigured) return { success: false, error: 'Hindi nakakonekta sa Supabase database.' };
   const client = getSupabaseClient();
   if (!client) return { success: false, error: 'Database client not initialized.' };
   try {
     const row = toDbSubscriptionRow(tx);
-    const { error } = await client.from('subscriptions').upsert(row as any, { onConflict: 'id' });
+    const { error } = isNewInsert
+      ? await client.from('subscriptions').insert(row as any)
+      : await client.from('subscriptions').upsert(row as any, { onConflict: 'id' });
     if (error) {
-      console.error('Supabase subscriptions upsert error:', error.message);
+      console.error('Supabase subscriptions write error:', error.message);
       return { success: false, error: error.message };
     }
     return { success: true };

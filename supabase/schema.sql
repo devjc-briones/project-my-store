@@ -1474,7 +1474,10 @@ create policy "subscriptions_select" on public.subscriptions
 
 drop policy if exists "subscriptions_seller_insert" on public.subscriptions;
 create policy "subscriptions_seller_insert" on public.subscriptions
-  for insert with check (user_id = auth.uid() and status = 'pending');
+  for insert with check (
+    (user_id = auth.uid() and status = 'pending')
+    or public.current_user_role_id() = 1
+  );
 
 drop policy if exists "subscriptions_admin_update" on public.subscriptions;
 create policy "subscriptions_admin_update" on public.subscriptions

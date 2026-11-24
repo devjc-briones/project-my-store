@@ -117,6 +117,7 @@ export function UpgradePlanPage() {
   const [copiedNumber, setCopiedNumber] = useState(false);
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [cancelModalOpen, setCancelModalOpen] = useState(false);
+  const [isSubmittingPayment, setIsSubmittingPayment] = useState(false);
 
   // Confirmation banner state
   const [completedUpgrade, setCompletedUpgrade] = useState<{
@@ -288,8 +289,9 @@ export function UpgradePlanPage() {
     }
   };
 
-  const handleSubmitUpgrade = (e: React.FormEvent) => {
+  const handleSubmitUpgrade = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingPayment) return;
     if (isSamePlan && !isRenewalDue) return;
 
     // Selecting Free (Starter) while on a paid plan opens the Cancel Paid Plan flow
@@ -322,21 +324,30 @@ export function UpgradePlanPage() {
       return;
     }
 
+    if (!user) return;
+
     const referenceId = `SUB-${Date.now().toString().slice(-6)}`;
-    if (user) {
-      recordSubscriptionPayment({
-        userId: user.id,
-        userName: user.name,
-        userEmail: user.email,
-        planId: selectedPlan.id,
-        amount: selectedPlan.monthlyPrice,
-        paymentMethod: activeChannel.label,
-        referenceId,
-        status: 'pending',
-        dueDate: isRenewalDue ? resolvedPeriodEndsAt : undefined,
-        proofUrl: proofUrl || undefined,
-      });
+    setIsSubmittingPayment(true);
+    const res = await recordSubscriptionPayment({
+      userId: user.id,
+      userName: user.name,
+      userEmail: user.email,
+      planId: selectedPlan.id,
+      amount: selectedPlan.monthlyPrice,
+      paymentMethod: activeChannel.label,
+      referenceId,
+      status: 'pending',
+      dueDate: isRenewalDue ? resolvedPeriodEndsAt : undefined,
+      proofUrl: proofUrl || undefined,
+    });
+    setIsSubmittingPayment(false);
+
+    if (!res.success) {
+      setProofError(res.error || 'Unable to submit payment to database.');
+      triggerProofShake();
+      return;
     }
+
     setCompletedUpgrade({
       planName: selectedPlan.name,
       priceLabel: `${selectedPlan.priceLabel} / month`,
@@ -1009,10 +1020,12 @@ export function UpgradePlanPage() {
                   <div className="space-y-2 pt-1">
                     <button
                       type="submit"
-                      disabled={!activeChannel}
+                      disabled={!activeChannel || isSubmittingPayment}
                       className="w-full min-h-[46px] px-5 py-3 text-sm font-semibold rounded-xl bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed text-white transition-colors cursor-pointer"
                     >
-                      {isRenewalDue
+                      {isSubmittingPayment
+                        ? 'Submitting payment...'
+                        : isRenewalDue
                         ? `Pay ${selectedPlan.priceLabel} & Settle Due Plan`
                         : `Pay ${selectedPlan.priceLabel} & Activate ${selectedPlan.name}`}
                     </button>
