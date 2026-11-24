@@ -96,7 +96,7 @@ interface StoreContextValue {
     name: string,
     email: string,
     password: string
-  ) => Promise<{ success: boolean; user?: User; error?: string }>;
+  ) => Promise<{ success: boolean; user?: User; requiresEmailConfirmation?: boolean; error?: string }>;
   signInAdminUser: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   resetUserPassword: (email: string, newPassword: string) => Promise<{ success: boolean; error?: string }>;
   signOut: () => void;
@@ -149,7 +149,7 @@ interface StoreContextValue {
     password: string;
     storeId?: string;
     storeName?: string;
-  }) => Promise<{ success: boolean; buyer?: BuyerAccount; error?: string }>;
+  }) => Promise<{ success: boolean; buyer?: BuyerAccount; requiresEmailConfirmation?: boolean; error?: string }>;
   buyerSignIn: (
     email: string,
     password: string
@@ -247,33 +247,55 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
     async function hydrateFromSupabase() {
       try {
+        const { data: sessionData } = await client!.auth.getSession();
+        const hasSession = Boolean(sessionData?.session?.user?.id);
+
         const [
-          { data: dbUsers },
           { data: dbStores },
           { data: dbProducts },
           { data: dbVariants },
           { data: dbCheckoutSettings },
           { data: dbPaymentSettings },
-          { data: dbOrders },
-          { data: dbOrderItems },
-          { data: dbPayments },
-          { data: dbSubs },
           { data: dbChannels },
-          { data: dbNotifications },
         ] = await Promise.all([
-          client!.from('users').select('*'),
           client!.from('stores').select('*'),
           client!.from('store_products').select('*'),
           client!.from('store_product_variants').select('*'),
           client!.from('store_checkout_settings').select('*'),
           client!.from('store_payments_settings').select('*'),
-          client!.from('buyer_orders').select('*'),
-          client!.from('order_items').select('*'),
-          client!.from('store_product_payments').select('*'),
-          client!.from('subscriptions').select('*'),
           client!.from('platform_payment_channels').select('*'),
-          client!.from('notifications').select('*'),
         ]);
+
+        let dbUsers: any[] | null = null;
+        let dbOrders: any[] | null = null;
+        let dbOrderItems: any[] | null = null;
+        let dbPayments: any[] | null = null;
+        let dbSubs: any[] | null = null;
+        let dbNotifications: any[] | null = null;
+
+        if (hasSession) {
+          const [
+            usersRes,
+            ordersRes,
+            orderItemsRes,
+            paymentsRes,
+            subsRes,
+            notificationsRes,
+          ] = await Promise.all([
+            client!.from('users').select('*'),
+            client!.from('buyer_orders').select('*'),
+            client!.from('order_items').select('*'),
+            client!.from('store_product_payments').select('*'),
+            client!.from('subscriptions').select('*'),
+            client!.from('notifications').select('*'),
+          ]);
+          dbUsers = usersRes.data;
+          dbOrders = ordersRes.data;
+          dbOrderItems = orderItemsRes.data;
+          dbPayments = paymentsRes.data;
+          dbSubs = subsRes.data;
+          dbNotifications = notificationsRes.data;
+        }
 
         const mappedUsers: User[] = (dbUsers || []).map((u: any) => ({
           id: u.id,
@@ -563,7 +585,6 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
               updatedAt: u.updated_at,
             }));
 
-          const { data: sessionData } = await client!.auth.getSession();
           const sessionUserId = sessionData?.session?.user?.id;
           const currentSessionUser = sessionUserId
             ? mappedUsers.find((u) => u.id === sessionUserId) || null
@@ -598,7 +619,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       const { data: authListener } = client.auth.onAuthStateChange((event, session) => {
         if (event === 'SIGNED_OUT' || !session) {
-          setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
+          setState((prev) => ({
+            ...prev,
+            currentUser: null,
+            currentBuyer: null,
+            notifications: [],
+            placedOrders: [],
+            subscriptionTransactions: [],
+          }));
+        } else if (event === 'SIGNED_IN') {
+          hydrateFromSupabase();
         }
       });
 
@@ -686,7 +716,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       name: string,
       email: string,
       password: string
-    ): Promise<{ success: boolean; user?: User; error?: string }> => {
+    ): Promise<{ success: boolean; user?: User; requiresEmailConfirmation?: boolean; error?: string }> => {
       const cleanName = name.trim();
       const normalizedEmail = email.trim().toLowerCase();
 
@@ -776,20 +806,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           updatedAt: now,
         };
 
+        if (authData.session === null) {
+          return {
+            success: true,
+            requiresEmailConfirmation: true,
+            user: newUser,
+          };
+        }
+
         setState((prev) => ({
           ...prev,
           currentUser: newUser,
           users: [newUser, ...(prev.users ?? []).filter((u) => u.id !== newUser.id)],
         }));
-
-        if (authData.session === null) {
-          pushToast({
-            type: 'info',
-            title: 'Supabase email confirmation',
-            description:
-              'Account created! If confirmation is required, check your email inbox to verify.',
-          });
-        }
 
         return { success: true, user: newUser };
       } catch (err: any) {
@@ -799,7 +828,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         };
       }
     },
-    [pushToast]
+    []
   );
 
   const signInUser = useCallback(
@@ -835,6 +864,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         });
 
         if (authError) {
+          if (authError.message.toLowerCase().includes('email not confirmed')) {
+            return {
+              success: false,
+              error:
+                'Hindi pa verified ang email mo. Buksan ang verification link sa iyong email inbox/spam, o i-off ang "Confirm email" sa Supabase Dashboard > Authentication > Providers > Email.',
+            };
+          }
           return { success: false, error: `Supabase Error: ${authError.message}` };
         }
 
@@ -1051,7 +1087,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       password: string;
       storeId?: string;
       storeName?: string;
-    }): Promise<{ success: boolean; buyer?: BuyerAccount; error?: string }> => {
+    }): Promise<{ success: boolean; buyer?: BuyerAccount; requiresEmailConfirmation?: boolean; error?: string }> => {
       const cleanName = input.name.trim();
       const cleanEmail = input.email.trim().toLowerCase();
 
@@ -1140,6 +1176,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           updatedAt: now,
         };
 
+        if (authData.session === null) {
+          return {
+            success: true,
+            requiresEmailConfirmation: true,
+            buyer: newBuyer,
+          };
+        }
+
         setState((prev) => ({
           ...prev,
           buyers: [...(prev.buyers ?? []).filter((b) => b.id !== authId), newBuyer],
@@ -1190,6 +1234,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         });
 
         if (authError) {
+          if (authError.message.toLowerCase().includes('email not confirmed')) {
+            return {
+              success: false,
+              error:
+                'Hindi pa verified ang email mo. Buksan ang verification link sa iyong email inbox/spam, o i-off ang "Confirm email" sa Supabase Dashboard > Authentication > Providers > Email.',
+            };
+          }
           return { success: false, error: `Supabase Error: ${authError.message}` };
         }
 

@@ -334,6 +334,19 @@ export function AuthPage() {
         triggerShake('signup');
         return;
       }
+      if (result.requiresEmailConfirmation) {
+        setSigninEmail(cleanEmail);
+        handleModeSwitch('signin');
+        setSigninErrors({
+          form: 'Na-save na sa Supabase ang account! Buksan ang confirmation link sa iyong email bago mag-Sign In (o i-off ang "Confirm email" sa Supabase Auth > Providers > Email).',
+        });
+        pushToast({
+          type: 'info',
+          title: 'Verify your email',
+          description: 'Account created in Supabase! Please check your email inbox to confirm.',
+        });
+        return;
+      }
       pushToast({
         type: 'success',
         title: 'Account created',

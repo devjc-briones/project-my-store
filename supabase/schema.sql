@@ -1257,6 +1257,20 @@ grant execute on function public.dismiss_notifications(uuid[]) to authenticated;
 grant execute on function public.is_store_billing_closed(uuid) to anon, authenticated;
 grant execute on function public.is_store_publicly_open(uuid) to anon, authenticated;
 
+-- Table & Sequence Privileges (RLS policies below strictly control row-level access)
+grant usage on schema public to anon, authenticated;
+grant select on
+  public.roles,
+  public.stores,
+  public.store_products,
+  public.store_product_variants,
+  public.store_checkout_settings,
+  public.store_payments_settings,
+  public.platform_payment_channels
+to anon;
+grant select, insert, update, delete on all tables in schema public to authenticated;
+grant usage, select on all sequences in schema public to anon, authenticated;
+
 -- ============================================================================
 -- 9. ROW-LEVEL SECURITY (RLS) POLICIES
 -- ============================================================================

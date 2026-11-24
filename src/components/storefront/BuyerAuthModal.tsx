@@ -430,6 +430,17 @@ export function BuyerAuthModal({
         setSignupErrors({ form: msg });
         pushToast({ type: 'error', title: 'Sign Up Failed', description: msg });
         triggerShake('signup');
+      } else if (res.requiresEmailConfirmation) {
+        setSigninEmail(trimmedEmail.toLowerCase());
+        handleTabSwitch('signin');
+        setSigninErrors({
+          form: 'Na-save na sa Supabase ang account! Buksan ang confirmation link sa iyong email bago mag-Sign In (o i-off ang "Confirm email" sa Supabase Auth > Providers > Email).',
+        });
+        pushToast({
+          type: 'info',
+          title: 'Verify your email',
+          description: 'Account created in Supabase! Please check your email inbox to confirm.',
+        });
       } else {
         pushToast({
           type: 'success',
