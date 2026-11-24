@@ -327,11 +327,13 @@ export function AdminPage() {
       if (!res.success) {
         const errMsg = res.error || 'Invalid admin credentials.';
         setAdminLoginError(errMsg);
-        pushToast({
-          type: 'error',
-          title: 'Admin Login Failed',
-          description: errMsg,
-        });
+        if (res.isSystemError) {
+          pushToast({
+            type: 'error',
+            title: 'Database Error',
+            description: errMsg,
+          });
+        }
         setShakeAdminForm(false);
         window.requestAnimationFrame(() => {
           setShakeAdminForm(true);

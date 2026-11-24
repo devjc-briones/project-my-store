@@ -75,3 +75,71 @@ export function generateUuid(): string {
     return v.toString(16);
   });
 }
+
+export function formatAuthError(rawMessage?: string): { message: string; isSystemError: boolean } {
+  const raw = (rawMessage || '').trim();
+  const lower = raw.toLowerCase();
+
+  if (lower.includes('invalid login credentials') || lower.includes('invalid credentials')) {
+    return {
+      message: 'Incorrect email or password. Please check your credentials and try again.',
+      isSystemError: false,
+    };
+  }
+  if (lower.includes('email not confirmed')) {
+    return {
+      message: 'Your email address is not confirmed yet. Please check your inbox for the verification link.',
+      isSystemError: false,
+    };
+  }
+  if (
+    lower.includes('user already registered') ||
+    lower.includes('already been registered') ||
+    lower.includes('already exists')
+  ) {
+    return {
+      message: 'An account with this email address already exists. Please sign in instead.',
+      isSystemError: false,
+    };
+  }
+  if (lower.includes('password should be at least') || lower.includes('weak_password')) {
+    return {
+      message: 'Password must be at least 6 characters.',
+      isSystemError: false,
+    };
+  }
+  if (lower.includes('unable to validate email') || lower.includes('invalid email')) {
+    return {
+      message: 'Please enter a valid email address.',
+      isSystemError: false,
+    };
+  }
+  if (
+    lower.includes('rate limit') ||
+    lower.includes('too many requests') ||
+    lower.includes('for security purposes')
+  ) {
+    return {
+      message: 'Too many attempts. Please wait a moment and try again.',
+      isSystemError: false,
+    };
+  }
+  if (lower.includes('new password should be different')) {
+    return {
+      message: 'Your new password must be different from your previous password.',
+      isSystemError: false,
+    };
+  }
+  if (lower.includes('auth session missing')) {
+    return {
+      message: 'Your session has expired. Please sign in again.',
+      isSystemError: false,
+    };
+  }
+
+  return {
+    message: raw ? `Database error: ${raw}` : 'Unable to reach database. Please try again.',
+    isSystemError: true,
+  };
+}
+

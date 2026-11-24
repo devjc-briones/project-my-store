@@ -1296,6 +1296,10 @@ drop policy if exists "users_select_self_or_admin" on public.users;
 create policy "users_select_self_or_admin" on public.users
   for select using (id = auth.uid() or public.current_user_role_id() = 1);
 
+drop policy if exists "users_insert_self" on public.users;
+create policy "users_insert_self" on public.users
+  for insert with check (id = auth.uid() and role_id in (2, 3));
+
 drop policy if exists "users_update_self" on public.users;
 create policy "users_update_self" on public.users
   for update using (id = auth.uid())

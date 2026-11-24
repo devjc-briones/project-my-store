@@ -319,7 +319,11 @@ export function BuyerAuthModal({
     const res = await buyerResetPassword(resetEmail.trim(), newPassword);
     setIsResetting(false);
     if (!res.success) {
-      setNewPassError(res.error || 'Failed to update password in database.');
+      const msg = res.error || 'Failed to update password. Please try again.';
+      setNewPassError(msg);
+      if (res.isSystemError) {
+        pushToast({ type: 'error', title: 'Database Error', description: msg });
+      }
       triggerShake('reset');
       return;
     }
@@ -357,9 +361,11 @@ export function BuyerAuthModal({
       setLoading(false);
 
       if (res.error || !res.success) {
-        const msg = res.error || 'Sign in failed.';
+        const msg = res.error || 'Incorrect email or password.';
         setSigninErrors({ form: msg });
-        pushToast({ type: 'error', title: 'Sign In Failed', description: msg });
+        if (res.isSystemError) {
+          pushToast({ type: 'error', title: 'Database Error', description: msg });
+        }
         triggerShake('signin');
       } else {
         pushToast({
@@ -428,18 +434,20 @@ export function BuyerAuthModal({
       if (res.error || !res.success) {
         const msg = res.error || 'Unable to create account.';
         setSignupErrors({ form: msg });
-        pushToast({ type: 'error', title: 'Sign Up Failed', description: msg });
+        if (res.isSystemError) {
+          pushToast({ type: 'error', title: 'Database Error', description: msg });
+        }
         triggerShake('signup');
       } else if (res.requiresEmailConfirmation) {
         setSigninEmail(trimmedEmail.toLowerCase());
         handleTabSwitch('signin');
         setSigninErrors({
-          form: 'Na-save na sa Supabase ang account! Buksan ang confirmation link sa iyong email bago mag-Sign In (o i-off ang "Confirm email" sa Supabase Auth > Providers > Email).',
+          form: 'Account created! Please check your email inbox (or spam folder) and click the verification link before signing in.',
         });
         pushToast({
           type: 'info',
           title: 'Verify your email',
-          description: 'Account created in Supabase! Please check your email inbox to confirm.',
+          description: 'Account created! Please check your email inbox to confirm before signing in.',
         });
       } else {
         pushToast({

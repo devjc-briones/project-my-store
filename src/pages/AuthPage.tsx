@@ -55,7 +55,7 @@ function getPasswordStrength(val: string) {
 }
 
 export function AuthPage() {
-  const { route, navigate, signInUser, signUpUser, resetUserPassword, pushToast } = useStore();
+  const { state, route, navigate, signInUser, signUpUser, resetUserPassword, pushToast } = useStore();
   const initialMode: AuthMode =
     route.name === 'login' && route.mode === 'signup' ? 'signup' : 'signin';
 
@@ -163,6 +163,15 @@ export function AuthPage() {
     }
   }, [routeMode]);
 
+  useEffect(() => {
+    if (route.name === 'login' && state.currentUser) {
+      navigate(
+        { name: state.currentUser.role === Roles.Admin ? 'admin' : 'dashboard' },
+        { replace: true }
+      );
+    }
+  }, [route.name, state.currentUser, navigate]);
+
   const resetForgotState = () => {
     setOtpInput('');
     setGeneratedOtp(null);
@@ -240,9 +249,8 @@ export function AuthPage() {
       const result = await signInUser(cleanEmail, signinPassword);
       setIsSubmitting(false);
       if (!result.success) {
-        const message = result.error || 'Invalid email or password.';
-        const lower = message.toLowerCase();
-        if (lower.includes('database') || lower.includes('supabase') || lower.includes('hindi nakakonekta') || lower.includes('vercel')) {
+        const message = result.error || 'Incorrect email or password.';
+        if (result.isSystemError) {
           setSigninErrors({ form: message });
           pushToast({
             type: 'error',
@@ -250,9 +258,14 @@ export function AuthPage() {
             description: message,
           });
         } else {
-          setSigninErrors(
-            lower.includes('password') ? { password: message } : { email: message }
-          );
+          const lower = message.toLowerCase();
+          if (lower.includes('password') && !lower.includes('email')) {
+            setSigninErrors({ password: message });
+          } else if (lower.includes('email') && !lower.includes('password') && !lower.includes('confirmed')) {
+            setSigninErrors({ email: message });
+          } else {
+            setSigninErrors({ form: message });
+          }
         }
         triggerShake('signin');
         return;
@@ -264,7 +277,7 @@ export function AuthPage() {
           title: 'Admin signed in',
           description: 'Welcome to the mystore Admin Console.',
         });
-        navigate({ name: 'admin' });
+        navigate({ name: 'admin' }, { replace: true });
         return;
       }
 
@@ -273,7 +286,7 @@ export function AuthPage() {
         title: 'Signed in successfully',
         description: `Welcome back, ${result.user?.name ?? 'Merchant'}.`,
       });
-      navigate({ name: 'dashboard' });
+      navigate({ name: 'dashboard' }, { replace: true });
     } catch (err: any) {
       setIsSubmitting(false);
       const message = err?.message || 'Unable to connect to database.';
@@ -320,8 +333,7 @@ export function AuthPage() {
       setIsSubmitting(false);
       if (!result.success) {
         const message = result.error || 'Unable to create account.';
-        const lower = message.toLowerCase();
-        if (lower.includes('database') || lower.includes('supabase') || lower.includes('hindi nakakonekta') || lower.includes('vercel')) {
+        if (result.isSystemError) {
           setSignupErrors({ form: message });
           pushToast({
             type: 'error',
@@ -329,7 +341,14 @@ export function AuthPage() {
             description: message,
           });
         } else {
-          setSignupErrors({ email: message });
+          const lower = message.toLowerCase();
+          if (lower.includes('password')) {
+            setSignupErrors({ password: message });
+          } else if (lower.includes('email') || lower.includes('already exists')) {
+            setSignupErrors({ email: message });
+          } else {
+            setSignupErrors({ form: message });
+          }
         }
         triggerShake('signup');
         return;
@@ -338,12 +357,12 @@ export function AuthPage() {
         setSigninEmail(cleanEmail);
         handleModeSwitch('signin');
         setSigninErrors({
-          form: 'Na-save na sa Supabase ang account! Buksan ang confirmation link sa iyong email bago mag-Sign In (o i-off ang "Confirm email" sa Supabase Auth > Providers > Email).',
+          form: 'Account created! Please check your email inbox (or spam folder) and click the verification link before signing in.',
         });
         pushToast({
           type: 'info',
           title: 'Verify your email',
-          description: 'Account created in Supabase! Please check your email inbox to confirm.',
+          description: 'Account created! Please check your email inbox to confirm before signing in.',
         });
         return;
       }
@@ -352,7 +371,7 @@ export function AuthPage() {
         title: 'Account created',
         description: `Welcome to mystore, ${trimmedName}.`,
       });
-      navigate({ name: 'dashboard' });
+      navigate({ name: 'dashboard' }, { replace: true });
     } catch (err: any) {
       setIsSubmitting(false);
       const message = err?.message || 'Unable to connect to database.';
@@ -449,7 +468,11 @@ export function AuthPage() {
     const res = await resetUserPassword(resetEmail.trim(), newPassword);
     setIsResetting(false);
     if (!res.success) {
-      setNewPassError(res.error || 'Failed to update password in database.');
+      const msg = res.error || 'Failed to update password. Please try again.';
+      setNewPassError(msg);
+      if (res.isSystemError) {
+        pushToast({ type: 'error', title: 'Database Error', description: msg });
+      }
       triggerShake('reset');
       return;
     }

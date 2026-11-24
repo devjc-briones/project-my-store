@@ -27,6 +27,9 @@ function AppRouter() {
   }
 
   if (route.name === 'login') {
+    if (state.currentUser) {
+      return state.currentUser.role === Roles.Admin ? <AdminPage /> : <DashboardPage />;
+    }
     return <AuthPage />;
   }
 

@@ -46,7 +46,7 @@ import {
   syncSubscriptionToSupabase,
   syncUserToSupabase,
 } from '../utils/supabaseSync';
-import { generateUuid, getSupabaseClient, getSupabaseConfigStatus, isSupabaseConfigured } from '../utils/supabaseClient';
+import { formatAuthError, generateUuid, getSupabaseClient, getSupabaseConfigStatus, isSupabaseConfigured } from '../utils/supabaseClient';
 import { AppRoute, buildRoutePath, parseRoute } from '../router/routes';
 
 const STORAGE_KEY = 'mystore_saas_state_v2';
@@ -91,14 +91,14 @@ interface StoreContextValue {
   signInUser: (
     email: string,
     password: string
-  ) => Promise<{ success: boolean; user?: User; error?: string }>;
+  ) => Promise<{ success: boolean; user?: User; error?: string; isSystemError?: boolean }>;
   signUpUser: (
     name: string,
     email: string,
     password: string
-  ) => Promise<{ success: boolean; user?: User; requiresEmailConfirmation?: boolean; error?: string }>;
-  signInAdminUser: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
-  resetUserPassword: (email: string, newPassword: string) => Promise<{ success: boolean; error?: string }>;
+  ) => Promise<{ success: boolean; user?: User; requiresEmailConfirmation?: boolean; error?: string; isSystemError?: boolean }>;
+  signInAdminUser: (email: string, password: string) => Promise<{ success: boolean; error?: string; isSystemError?: boolean }>;
+  resetUserPassword: (email: string, newPassword: string) => Promise<{ success: boolean; error?: string; isSystemError?: boolean }>;
   signOut: () => void;
   updateUserProfile: (
     updates: Partial<Pick<User, 'name' | 'email' | 'plan' | 'planPeriodEndsAt' | 'cancelAtPeriodEnd'>>
@@ -149,12 +149,12 @@ interface StoreContextValue {
     password: string;
     storeId?: string;
     storeName?: string;
-  }) => Promise<{ success: boolean; buyer?: BuyerAccount; requiresEmailConfirmation?: boolean; error?: string }>;
+  }) => Promise<{ success: boolean; buyer?: BuyerAccount; requiresEmailConfirmation?: boolean; error?: string; isSystemError?: boolean }>;
   buyerSignIn: (
     email: string,
     password: string
-  ) => Promise<{ success: boolean; buyer?: BuyerAccount; error?: string }>;
-  buyerResetPassword: (email: string, newPassword: string) => Promise<{ success: boolean; error?: string }>;
+  ) => Promise<{ success: boolean; buyer?: BuyerAccount; error?: string; isSystemError?: boolean }>;
+  buyerResetPassword: (email: string, newPassword: string) => Promise<{ success: boolean; error?: string; isSystemError?: boolean }>;
   buyerSignOut: () => void;
   getBuyerOrders: () => CustomerOrder[];
   getBuyerCheckoutInfo: () => BuyerCheckoutInfo | null;
@@ -245,10 +245,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     const client = getSupabaseClient();
     if (!client) return;
 
-    async function hydrateFromSupabase() {
+    async function hydrateFromSupabase(explicitSession?: any) {
       try {
-        const { data: sessionData } = await client!.auth.getSession();
-        const hasSession = Boolean(sessionData?.session?.user?.id);
+        let activeSession = explicitSession;
+        if (!activeSession) {
+          const { data: sessionData } = await client!.auth.getSession();
+          activeSession = sessionData?.session ?? null;
+        }
+        const sessionUserId: string | undefined = activeSession?.user?.id;
+        const hasSession = Boolean(sessionUserId);
 
         const [
           { data: dbStores },
@@ -272,8 +277,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         let dbPayments: any[] | null = null;
         let dbSubs: any[] | null = null;
         let dbNotifications: any[] | null = null;
+        let usersFetchFailed = false;
 
-        if (hasSession) {
+        if (hasSession && sessionUserId) {
           const [
             usersRes,
             ordersRes,
@@ -289,7 +295,28 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             client!.from('subscriptions').select('*'),
             client!.from('notifications').select('*'),
           ]);
-          dbUsers = usersRes.data;
+
+          if (usersRes.error) {
+            usersFetchFailed = true;
+            console.error('Supabase users fetch error during hydration:', usersRes.error);
+          }
+
+          dbUsers = usersRes.data || [];
+
+          if (!dbUsers.some((u: any) => u.id === sessionUserId)) {
+            const { data: selfUser, error: selfErr } = await client!
+              .from('users')
+              .select('*')
+              .eq('id', sessionUserId)
+              .maybeSingle();
+            if (selfErr) {
+              usersFetchFailed = true;
+              console.error('Supabase self user fetch error during hydration:', selfErr);
+            } else if (selfUser) {
+              dbUsers = [selfUser, ...dbUsers];
+            }
+          }
+
           dbOrders = ordersRes.data;
           dbOrderItems = orderItemsRes.data;
           dbPayments = paymentsRes.data;
@@ -585,7 +612,6 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
               updatedAt: u.updated_at,
             }));
 
-          const sessionUserId = sessionData?.session?.user?.id;
           const currentSessionUser = sessionUserId
             ? mappedUsers.find((u) => u.id === sessionUserId) || null
             : null;
@@ -593,23 +619,41 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             ? mappedBuyers.find((b) => b.id === sessionUserId) || null
             : null;
 
-          setState((prev) => ({
-            ...prev,
-            users: mappedUsers,
-            buyers: mappedBuyers,
-            stores: mappedStores,
-            products: mappedProducts,
-            paymentSettingsByStore,
-            placedOrders: mappedOrders,
-            subscriptionTransactions: mappedSubs,
-            platformPaymentSettings: {
-              channels: mappedChannels.length > 0 ? mappedChannels : (prev.platformPaymentSettings?.channels || []),
-              updatedAt: new Date().toISOString(),
-            },
-            notifications: mappedNotifications,
-            currentUser: currentSessionUser && (currentSessionUser.role === Roles.Admin || currentSessionUser.role === Roles.Seller) ? currentSessionUser : null,
-            currentBuyer: currentSessionBuyer,
-          }));
+          setState((prev) => {
+            let nextCurrentUser: User | null = null;
+            if (currentSessionUser) {
+              nextCurrentUser =
+                currentSessionUser.role === Roles.Admin || currentSessionUser.role === Roles.Seller
+                  ? currentSessionUser
+                  : null;
+            } else if (hasSession && sessionUserId && prev.currentUser?.id === sessionUserId) {
+              // Preserve active signed-in user if users table read had a transient/RLS issue
+              nextCurrentUser = prev.currentUser;
+            }
+
+            let nextCurrentBuyer: BuyerAccount | null = currentSessionBuyer;
+            if (!nextCurrentBuyer && hasSession && sessionUserId && usersFetchFailed && prev.currentBuyer?.id === sessionUserId) {
+              nextCurrentBuyer = prev.currentBuyer;
+            }
+
+            return {
+              ...prev,
+              users: mappedUsers,
+              buyers: mappedBuyers,
+              stores: mappedStores,
+              products: mappedProducts,
+              paymentSettingsByStore,
+              placedOrders: mappedOrders,
+              subscriptionTransactions: mappedSubs,
+              platformPaymentSettings: {
+                channels: mappedChannels.length > 0 ? mappedChannels : (prev.platformPaymentSettings?.channels || []),
+                updatedAt: new Date().toISOString(),
+              },
+              notifications: mappedNotifications,
+              currentUser: nextCurrentUser,
+              currentBuyer: nextCurrentBuyer,
+            };
+          });
         } catch (err) {
           console.error('Error hydrating from Supabase:', err);
         }
@@ -628,7 +672,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             subscriptionTransactions: [],
           }));
         } else if (event === 'SIGNED_IN') {
-          hydrateFromSupabase();
+          hydrateFromSupabase(session);
         }
       });
 
@@ -716,7 +760,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       name: string,
       email: string,
       password: string
-    ): Promise<{ success: boolean; user?: User; requiresEmailConfirmation?: boolean; error?: string }> => {
+    ): Promise<{ success: boolean; user?: User; requiresEmailConfirmation?: boolean; error?: string; isSystemError?: boolean }> => {
       const cleanName = name.trim();
       const normalizedEmail = email.trim().toLowerCase();
 
@@ -732,14 +776,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       const configStatus = getSupabaseConfigStatus();
       if (!configStatus.configured) {
-        return { success: false, error: configStatus.reason };
+        return { success: false, error: configStatus.reason, isSystemError: true };
       }
 
       const client = getSupabaseClient();
       if (!client) {
         return {
           success: false,
-          error: 'Hindi ma-initialize ang database connection. Pakisuri ang configuration.',
+          error: 'Unable to initialize database connection.',
+          isSystemError: true,
         };
       }
 
@@ -756,11 +801,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         });
 
         if (authError) {
-          return { success: false, error: `Database Error: ${authError.message}` };
+          const formatted = formatAuthError(authError.message);
+          return { success: false, error: formatted.message, isSystemError: formatted.isSystemError };
         }
 
         if (!authData.user?.id) {
-          return { success: false, error: 'Failed to create user in Supabase database.' };
+          return { success: false, error: 'Unable to create account. Please try again.', isSystemError: true };
         }
 
         const authId = authData.user.id;
@@ -789,6 +835,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             return {
               success: false,
               error: `Database Error (public.users): ${dbError.message}`,
+              isSystemError: true,
             };
           }
         }
@@ -825,6 +872,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         return {
           success: false,
           error: `Database connection error: ${err?.message || 'Unable to sign up.'}`,
+          isSystemError: true,
         };
       }
     },
@@ -835,7 +883,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     async (
       email: string,
       password: string
-    ): Promise<{ success: boolean; user?: User; error?: string }> => {
+    ): Promise<{ success: boolean; user?: User; error?: string; isSystemError?: boolean }> => {
       const normalizedEmail = email.trim().toLowerCase();
       if (!normalizedEmail || !EMAIL_REGEX.test(normalizedEmail)) {
         return { success: false, error: 'Please enter a valid email address.' };
@@ -846,14 +894,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       const configStatus = getSupabaseConfigStatus();
       if (!configStatus.configured) {
-        return { success: false, error: configStatus.reason };
+        return { success: false, error: configStatus.reason, isSystemError: true };
       }
 
       const client = getSupabaseClient();
       if (!client) {
         return {
           success: false,
-          error: 'Hindi ma-initialize ang database connection. Pakisuri ang configuration.',
+          error: 'Unable to initialize database connection.',
+          isSystemError: true,
         };
       }
 
@@ -864,18 +913,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         });
 
         if (authError) {
-          if (authError.message.toLowerCase().includes('email not confirmed')) {
-            return {
-              success: false,
-              error:
-                'Hindi pa verified ang email mo. Buksan ang verification link sa iyong email inbox/spam, o i-off ang "Confirm email" sa Supabase Dashboard > Authentication > Providers > Email.',
-            };
-          }
-          return { success: false, error: `Supabase Error: ${authError.message}` };
+          const formatted = formatAuthError(authError.message);
+          return { success: false, error: formatted.message, isSystemError: formatted.isSystemError };
         }
 
         if (!authData.user?.id) {
-          return { success: false, error: 'No user record returned from Supabase database.' };
+          return { success: false, error: 'No account record returned from database.', isSystemError: true };
         }
 
         const authId = authData.user.id;
@@ -886,19 +929,26 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           .maybeSingle();
 
         if (dbErr) {
-          return { success: false, error: `Database Error: ${dbErr.message}` };
+          return { success: false, error: `Database Error: ${dbErr.message}`, isSystemError: true };
         }
 
         const now = new Date().toISOString();
         let activeUser: User;
 
         if (dbUser) {
+          if (dbUser.role_id === 3) {
+            await client.auth.signOut();
+            return {
+              success: false,
+              error: 'This is a customer account. Please sign in through a store page instead.',
+              isSystemError: false,
+            };
+          }
           activeUser = {
             id: dbUser.id,
             name: dbUser.name || authData.user.user_metadata?.name || normalizedEmail.split('@')[0],
             email: dbUser.email || normalizedEmail,
-            role:
-              dbUser.role_id === 1 ? Roles.Admin : dbUser.role_id === 2 ? Roles.Seller : Roles.Buyer,
+            role: dbUser.role_id === 1 ? Roles.Admin : Roles.Seller,
             roleId: dbUser.role_id,
             plan: dbUser.plan || 'starter',
             status: dbUser.status || 'active',
@@ -918,7 +968,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           client.from('users').update({ last_active_at: now }).eq('id', authId).then();
         } else {
           const displayName = authData.user.user_metadata?.name || normalizedEmail.split('@')[0];
-          activeUser = {
+          const fallbackUser: User = {
             id: authId,
             name: displayName,
             email: normalizedEmail,
@@ -930,7 +980,29 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             createdAt: now,
             updatedAt: now,
           };
-          await client.from('users').upsert(toDbUserRow(activeUser) as any, { onConflict: 'id' });
+          const { data: createdRow, error: upsertErr } = await client
+            .from('users')
+            .upsert(toDbUserRow(fallbackUser) as any, { onConflict: 'id' })
+            .select('*')
+            .maybeSingle();
+
+          if (upsertErr || !createdRow) {
+            await client.auth.signOut();
+            return {
+              success: false,
+              error: `Database Error (public.users): ${upsertErr?.message || 'Account profile could not be read or created. Check RLS policies on public.users.'}`,
+              isSystemError: true,
+            };
+          }
+
+          activeUser = {
+            ...fallbackUser,
+            name: createdRow.name || displayName,
+            role: createdRow.role_id === 1 ? Roles.Admin : Roles.Seller,
+            roleId: createdRow.role_id,
+            plan: createdRow.plan || 'starter',
+            status: createdRow.status || 'active',
+          };
         }
 
         setState((prev) => ({
@@ -944,6 +1016,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         return {
           success: false,
           error: `Database connection error: ${err?.message || 'Sign in failed.'}`,
+          isSystemError: true,
         };
       }
     },
@@ -951,7 +1024,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const signInAdminUser = useCallback(
-    async (email: string, password: string): Promise<{ success: boolean; error?: string }> => {
+    async (email: string, password: string): Promise<{ success: boolean; error?: string; isSystemError?: boolean }> => {
       const normalizedEmail = email.trim().toLowerCase();
       if (!normalizedEmail || !EMAIL_REGEX.test(normalizedEmail)) {
         return { success: false, error: 'Please enter a valid admin email address.' };
@@ -962,14 +1035,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       const configStatus = getSupabaseConfigStatus();
       if (!configStatus.configured) {
-        return { success: false, error: configStatus.reason };
+        return { success: false, error: configStatus.reason, isSystemError: true };
       }
 
       const client = getSupabaseClient();
       if (!client) {
         return {
           success: false,
-          error: 'Hindi ma-initialize ang database connection. Pakisuri ang configuration.',
+          error: 'Unable to initialize database connection.',
+          isSystemError: true,
         };
       }
 
@@ -980,11 +1054,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         });
 
         if (authError) {
-          return { success: false, error: `Supabase Auth Error: ${authError.message}` };
+          const formatted = formatAuthError(authError.message);
+          return { success: false, error: formatted.message, isSystemError: formatted.isSystemError };
         }
 
         if (!authData.user?.id) {
-          return { success: false, error: 'Walang naibalik na user record mula sa Supabase database.' };
+          return { success: false, error: 'No administrator record returned from database.', isSystemError: true };
         }
 
         const authId = authData.user.id;
@@ -995,15 +1070,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           .maybeSingle();
 
         if (dbErr) {
-          return { success: false, error: `Database Error: ${dbErr.message}` };
+          return { success: false, error: `Database Error: ${dbErr.message}`, isSystemError: true };
         }
 
         if (!dbUser || dbUser.role_id !== 1) {
           await client.auth.signOut();
           return {
             success: false,
-            error:
-              'Access denied: Hindi administrator account ang credentials na ito (kailangang role_id = 1 sa public.users table sa Supabase).',
+            error: 'Access denied: This account does not have administrator privileges.',
           };
         }
 
@@ -1033,7 +1107,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       } catch (err: any) {
         return {
           success: false,
-          error: `Admin login error: ${err?.message || 'Failed to authenticate admin account.'}`,
+          error: `Database connection error: ${err?.message || 'Failed to authenticate admin account.'}`,
+          isSystemError: true,
         };
       }
     },
@@ -1041,7 +1116,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const resetUserPassword = useCallback(
-    async (email: string, newPassword: string): Promise<{ success: boolean; error?: string }> => {
+    async (email: string, newPassword: string): Promise<{ success: boolean; error?: string; isSystemError?: boolean }> => {
       const cleanEmail = email.trim().toLowerCase();
       if (!cleanEmail || !newPassword || newPassword.length < 6) {
         return { success: false, error: 'Password must be at least 6 characters.' };
@@ -1049,22 +1124,27 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       const configStatus = getSupabaseConfigStatus();
       if (!configStatus.configured) {
-        return { success: false, error: configStatus.reason };
+        return { success: false, error: configStatus.reason, isSystemError: true };
       }
 
       const client = getSupabaseClient();
       if (!client) {
-        return { success: false, error: 'Database client not initialized.' };
+        return { success: false, error: 'Database client not initialized.', isSystemError: true };
       }
 
       try {
         const { error } = await client.auth.updateUser({ password: newPassword });
         if (error) {
-          return { success: false, error: error.message };
+          const formatted = formatAuthError(error.message);
+          return { success: false, error: formatted.message, isSystemError: formatted.isSystemError };
         }
         return { success: true };
       } catch (err: any) {
-        return { success: false, error: err?.message || 'Password update failed.' };
+        return {
+          success: false,
+          error: `Database connection error: ${err?.message || 'Password update failed.'}`,
+          isSystemError: true,
+        };
       }
     },
     []
@@ -1087,7 +1167,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       password: string;
       storeId?: string;
       storeName?: string;
-    }): Promise<{ success: boolean; buyer?: BuyerAccount; requiresEmailConfirmation?: boolean; error?: string }> => {
+    }): Promise<{ success: boolean; buyer?: BuyerAccount; requiresEmailConfirmation?: boolean; error?: string; isSystemError?: boolean }> => {
       const cleanName = input.name.trim();
       const cleanEmail = input.email.trim().toLowerCase();
 
@@ -1103,14 +1183,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       const configStatus = getSupabaseConfigStatus();
       if (!configStatus.configured) {
-        return { success: false, error: configStatus.reason };
+        return { success: false, error: configStatus.reason, isSystemError: true };
       }
 
       const client = getSupabaseClient();
       if (!client) {
         return {
           success: false,
-          error: 'Hindi ma-initialize ang database connection. Pakisuri ang configuration.',
+          error: 'Unable to initialize database connection.',
+          isSystemError: true,
         };
       }
 
@@ -1128,11 +1209,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         });
 
         if (authError) {
-          return { success: false, error: `Supabase Error: ${authError.message}` };
+          const formatted = formatAuthError(authError.message);
+          return { success: false, error: formatted.message, isSystemError: formatted.isSystemError };
         }
 
         if (!authData.user?.id) {
-          return { success: false, error: 'Failed to create buyer account in database.' };
+          return { success: false, error: 'Unable to create account. Please try again.', isSystemError: true };
         }
 
         const authId = authData.user.id;
@@ -1160,6 +1242,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             return {
               success: false,
               error: `Database Error (public.users): ${dbError.message}`,
+              isSystemError: true,
             };
           }
         }
@@ -1195,6 +1278,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         return {
           success: false,
           error: `Database connection error: ${err?.message || 'Failed to sign up buyer.'}`,
+          isSystemError: true,
         };
       }
     },
@@ -1205,7 +1289,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     async (
       email: string,
       password: string
-    ): Promise<{ success: boolean; buyer?: BuyerAccount; error?: string }> => {
+    ): Promise<{ success: boolean; buyer?: BuyerAccount; error?: string; isSystemError?: boolean }> => {
       const cleanEmail = email.trim().toLowerCase();
       if (!cleanEmail || !EMAIL_REGEX.test(cleanEmail)) {
         return { success: false, error: 'Please enter a valid email address.' };
@@ -1216,14 +1300,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       const configStatus = getSupabaseConfigStatus();
       if (!configStatus.configured) {
-        return { success: false, error: configStatus.reason };
+        return { success: false, error: configStatus.reason, isSystemError: true };
       }
 
       const client = getSupabaseClient();
       if (!client) {
         return {
           success: false,
-          error: 'Hindi ma-initialize ang database connection. Pakisuri ang configuration.',
+          error: 'Unable to initialize database connection.',
+          isSystemError: true,
         };
       }
 
@@ -1234,18 +1319,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         });
 
         if (authError) {
-          if (authError.message.toLowerCase().includes('email not confirmed')) {
-            return {
-              success: false,
-              error:
-                'Hindi pa verified ang email mo. Buksan ang verification link sa iyong email inbox/spam, o i-off ang "Confirm email" sa Supabase Dashboard > Authentication > Providers > Email.',
-            };
-          }
-          return { success: false, error: `Supabase Error: ${authError.message}` };
+          const formatted = formatAuthError(authError.message);
+          return { success: false, error: formatted.message, isSystemError: formatted.isSystemError };
         }
 
         if (!authData.user?.id) {
-          return { success: false, error: 'No user record returned from Supabase.' };
+          return { success: false, error: 'No account record returned from database.', isSystemError: true };
         }
 
         const authId = authData.user.id;
@@ -1256,30 +1335,58 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           .maybeSingle();
 
         if (dbErr) {
-          return { success: false, error: `Database Error: ${dbErr.message}` };
+          return { success: false, error: `Database Error: ${dbErr.message}`, isSystemError: true };
         }
 
         const now = new Date().toISOString();
+        let activeDbBuyer = dbUser;
+        if (!activeDbBuyer) {
+          const displayName = authData.user.user_metadata?.name || cleanEmail.split('@')[0];
+          const fallbackBuyer: BuyerAccount = {
+            id: authId,
+            name: displayName,
+            email: cleanEmail,
+            role: Roles.Buyer,
+            roleId: 3,
+            createdAt: now,
+            updatedAt: now,
+          };
+          const { data: createdBuyerRow, error: buyerUpsertErr } = await client
+            .from('users')
+            .upsert(toDbUserRow(fallbackBuyer) as any, { onConflict: 'id' })
+            .select('*')
+            .maybeSingle();
+          if (buyerUpsertErr || !createdBuyerRow) {
+            await client.auth.signOut();
+            return {
+              success: false,
+              error: `Database Error (public.users): ${buyerUpsertErr?.message || 'Account profile could not be read or created.'}`,
+              isSystemError: true,
+            };
+          }
+          activeDbBuyer = createdBuyerRow;
+        }
+
         const buyer: BuyerAccount = {
           id: authId,
-          name: dbUser?.name || authData.user.user_metadata?.name || cleanEmail.split('@')[0],
-          email: dbUser?.email || cleanEmail,
+          name: activeDbBuyer.name || authData.user.user_metadata?.name || cleanEmail.split('@')[0],
+          email: activeDbBuyer.email || cleanEmail,
           role: Roles.Buyer,
-          roleId: dbUser?.role_id ?? 3,
-          storeId: dbUser?.registered_store_id || undefined,
+          roleId: activeDbBuyer.role_id ?? 3,
+          storeId: activeDbBuyer.registered_store_id || undefined,
           savedCheckoutInfo:
-            dbUser?.phone_number || dbUser?.address
+            activeDbBuyer.phone_number || activeDbBuyer.address
               ? {
-                  fullName: dbUser.name,
-                  phoneNumber: dbUser.phone_number || '',
-                  deliveryAddress: dbUser.address || '',
-                  notes: dbUser.delivery_notes || undefined,
-                  preferredPaymentMethod: dbUser.preferred_payment_method || undefined,
-                  updatedAt: dbUser.checkout_info_updated_at || now,
+                  fullName: activeDbBuyer.name,
+                  phoneNumber: activeDbBuyer.phone_number || '',
+                  deliveryAddress: activeDbBuyer.address || '',
+                  notes: activeDbBuyer.delivery_notes || undefined,
+                  preferredPaymentMethod: activeDbBuyer.preferred_payment_method || undefined,
+                  updatedAt: activeDbBuyer.checkout_info_updated_at || now,
                 }
               : undefined,
-          createdAt: dbUser?.created_at || now,
-          updatedAt: dbUser?.updated_at || now,
+          createdAt: activeDbBuyer.created_at || now,
+          updatedAt: activeDbBuyer.updated_at || now,
         };
 
         client.from('users').update({ last_active_at: now }).eq('id', authId).then();
@@ -1295,6 +1402,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         return {
           success: false,
           error: `Database connection error: ${err?.message || 'Failed to sign in buyer.'}`,
+          isSystemError: true,
         };
       }
     },
@@ -1302,7 +1410,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const buyerResetPassword = useCallback(
-    async (email: string, newPassword: string): Promise<{ success: boolean; error?: string }> => {
+    async (email: string, newPassword: string): Promise<{ success: boolean; error?: string; isSystemError?: boolean }> => {
       const cleanEmail = email.trim().toLowerCase();
       if (!cleanEmail || !newPassword || newPassword.length < 6) {
         return { success: false, error: 'Password must be at least 6 characters.' };
@@ -1310,22 +1418,27 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       const configStatus = getSupabaseConfigStatus();
       if (!configStatus.configured) {
-        return { success: false, error: configStatus.reason };
+        return { success: false, error: configStatus.reason, isSystemError: true };
       }
 
       const client = getSupabaseClient();
       if (!client) {
-        return { success: false, error: 'Database client not initialized.' };
+        return { success: false, error: 'Database client not initialized.', isSystemError: true };
       }
 
       try {
         const { error } = await client.auth.updateUser({ password: newPassword });
         if (error) {
-          return { success: false, error: error.message };
+          const formatted = formatAuthError(error.message);
+          return { success: false, error: formatted.message, isSystemError: formatted.isSystemError };
         }
         return { success: true };
       } catch (err: any) {
-        return { success: false, error: err?.message || 'Password update failed.' };
+        return {
+          success: false,
+          error: `Database connection error: ${err?.message || 'Password update failed.'}`,
+          isSystemError: true,
+        };
       }
     },
     []
