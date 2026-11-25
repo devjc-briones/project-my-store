@@ -400,10 +400,12 @@ export function BuyerAuthModal({
       nextErrors.email = 'Please enter a valid email address.';
     } else if (
       (state.users ?? []).some(
-        (u) => u.role === Roles.Admin && u.email.toLowerCase() === trimmedEmail.toLowerCase()
+        (u) =>
+          (u.role === Roles.Admin || u.role === Roles.Seller) &&
+          u.email.toLowerCase() === trimmedEmail.toLowerCase()
       )
     ) {
-      nextErrors.email = 'This email address is reserved.';
+      nextErrors.email = 'Merchant and admin accounts cannot register here. Please use a customer email.';
     }
     if (!signupPassword || signupPassword.length < 6) {
       nextErrors.password = 'Password must be at least 6 characters.';

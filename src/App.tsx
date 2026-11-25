@@ -27,8 +27,11 @@ function AppRouter() {
   }
 
   if (route.name === 'login') {
-    if (state.currentUser) {
-      return state.currentUser.role === Roles.Admin ? <AdminPage /> : <DashboardPage />;
+    if (state.currentUser?.role === Roles.Admin) {
+      return <AdminPage />;
+    }
+    if (state.currentUser?.role === Roles.Seller) {
+      return <DashboardPage />;
     }
     return <AuthPage />;
   }
@@ -42,7 +45,7 @@ function AppRouter() {
     route.name === 'store-customize' ||
     route.name === 'store-payments'
   ) {
-    if (!state.currentUser) {
+    if (!state.currentUser || state.currentUser.role === Roles.Buyer) {
       return <AuthPage />;
     }
     if (

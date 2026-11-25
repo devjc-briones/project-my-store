@@ -164,7 +164,11 @@ export function AuthPage() {
   }, [routeMode]);
 
   useEffect(() => {
-    if (route.name === 'login' && state.currentUser) {
+    if (
+      route.name === 'login' &&
+      state.currentUser &&
+      (state.currentUser.role === Roles.Admin || state.currentUser.role === Roles.Seller)
+    ) {
       navigate(
         { name: state.currentUser.role === Roles.Admin ? 'admin' : 'dashboard' },
         { replace: true }
@@ -278,6 +282,14 @@ export function AuthPage() {
           description: 'Welcome to the mystore Admin Console.',
         });
         navigate({ name: 'admin' }, { replace: true });
+        return;
+      }
+
+      if (result.user?.role !== Roles.Seller) {
+        setSigninErrors({
+          form: 'Customer accounts cannot sign in on the main website. Please sign in through a store page instead.',
+        });
+        triggerShake('signin');
         return;
       }
 

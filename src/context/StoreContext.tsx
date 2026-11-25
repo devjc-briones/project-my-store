@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppNotification,
   BuyerAccount,
@@ -255,6 +255,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
   const [routeHistory, setRouteHistory] = useState<AppRoute[]>([]);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const authValidationLockRef = useRef(false);
+  const hydrateSessionRef = useRef<((explicitSession?: any) => Promise<void>) | null>(null);
 
   // Hydrate state from Supabase on mount if configured
   useEffect(() => {
@@ -630,6 +632,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
               updatedAt: u.updated_at,
             }));
 
+          const { data: latestSessionData } = await client!.auth.getSession();
+          const latestSessionUserId = latestSessionData?.session?.user?.id;
+          if (hasSession && latestSessionUserId !== sessionUserId) {
+            return;
+          }
+
           const currentSessionUser = sessionUserId
             ? mappedUsers.find((u) => u.id === sessionUserId) || null
             : null;
@@ -644,7 +652,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                 currentSessionUser.role === Roles.Admin || currentSessionUser.role === Roles.Seller
                   ? currentSessionUser
                   : null;
-            } else if (hasSession && sessionUserId && prev.currentUser?.id === sessionUserId) {
+            } else if (hasSession && sessionUserId && usersFetchFailed && prev.currentUser?.id === sessionUserId) {
               // Preserve active signed-in user if users table read had a transient/RLS issue
               nextCurrentUser = prev.currentUser;
             }
@@ -677,11 +685,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
+      hydrateSessionRef.current = hydrateFromSupabase;
       let lastHydrateAt = Date.now();
       hydrateFromSupabase();
 
       const handleFocusOrVisible = () => {
         if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+        if (authValidationLockRef.current) return;
         const now = Date.now();
         if (now - lastHydrateAt < 5000) return;
         lastHydrateAt = now;
@@ -696,6 +706,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       }
 
       const { data: authListener } = client.auth.onAuthStateChange((event, session) => {
+        if (authValidationLockRef.current) {
+          return;
+        }
         if (event === 'SIGNED_OUT' || !session) {
           setState((prev) => ({
             ...prev,
@@ -712,6 +725,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       });
 
       return () => {
+        hydrateSessionRef.current = null;
         authListener?.subscription?.unsubscribe();
         if (typeof window !== 'undefined') {
           window.removeEventListener('focus', handleFocusOrVisible);
@@ -829,6 +843,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         };
       }
 
+      authValidationLockRef.current = true;
       try {
         const { data: authData, error: authError } = await client.auth.signUp({
           email: normalizedEmail,
@@ -850,10 +865,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           return { success: false, error: 'Unable to create account. Please try again.', isSystemError: true };
         }
 
+        if (Array.isArray(authData.user.identities) && authData.user.identities.length === 0) {
+          return {
+            success: false,
+            error: 'An account with this email address already exists. Please sign in instead.',
+            isSystemError: false,
+          };
+        }
+
         const authId = authData.user.id;
         const now = new Date().toISOString();
 
-        // Ensure user row exists in public.users table
+        // Ensure user row exists in public.users table with Seller role (role_id = 2)
         const userRow = {
           id: authId,
           role_id: 2, // seller
@@ -868,16 +891,31 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
         const { error: dbError } = await client
           .from('users')
-          .upsert(userRow as any, { onConflict: 'id' });
+          .insert(userRow as any);
         if (dbError) {
           console.error('Supabase users table insert error:', dbError);
           if (authData.session) {
-            await client.auth.signOut();
-            return {
-              success: false,
-              error: `Database Error (public.users): ${dbError.message}`,
-              isSystemError: true,
-            };
+            const { data: existingRow } = await client
+              .from('users')
+              .select('role_id')
+              .eq('id', authId)
+              .maybeSingle();
+            if (existingRow && existingRow.role_id !== 2) {
+              await client.auth.signOut();
+              return {
+                success: false,
+                error: 'An account with this email address already exists under another role.',
+                isSystemError: false,
+              };
+            }
+            if (!existingRow) {
+              await client.auth.signOut();
+              return {
+                success: false,
+                error: `Database Error (public.users): ${dbError.message}`,
+                isSystemError: true,
+              };
+            }
           }
         }
 
@@ -904,10 +942,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
         setState((prev) => ({
           ...prev,
+          currentBuyer: null,
           currentUser: newUser,
           users: [newUser, ...(prev.users ?? []).filter((u) => u.id !== newUser.id)],
         }));
 
+        authValidationLockRef.current = false;
+        hydrateSessionRef.current?.(authData.session);
         return { success: true, user: newUser };
       } catch (err: any) {
         return {
@@ -915,6 +956,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           error: `Database connection error: ${err?.message || 'Unable to sign up.'}`,
           isSystemError: true,
         };
+      } finally {
+        authValidationLockRef.current = false;
       }
     },
     []
@@ -947,6 +990,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         };
       }
 
+      authValidationLockRef.current = true;
       try {
         const { data: authData, error: authError } = await client.auth.signInWithPassword({
           email: normalizedEmail,
@@ -970,44 +1014,27 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           .maybeSingle();
 
         if (dbErr) {
+          await client.auth.signOut();
+          setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
           return { success: false, error: `Database Error: ${dbErr.message}`, isSystemError: true };
         }
 
         const now = new Date().toISOString();
-        let activeUser: User;
+        let resolvedRow = dbUser;
 
-        if (dbUser) {
-          if (dbUser.role_id === 3) {
+        if (!resolvedRow) {
+          const accountType = authData.user.user_metadata?.account_type;
+          const hasRegisteredStore = Boolean(authData.user.user_metadata?.registered_store_id);
+          if (accountType === 'buyer' || hasRegisteredStore) {
             await client.auth.signOut();
+            setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
             return {
               success: false,
-              error: 'This is a customer account. Please sign in through a store page instead.',
+              error: 'Customer accounts cannot sign in on the main website. Please sign in through a store page instead.',
               isSystemError: false,
             };
           }
-          activeUser = {
-            id: dbUser.id,
-            name: dbUser.name || authData.user.user_metadata?.name || normalizedEmail.split('@')[0],
-            email: dbUser.email || normalizedEmail,
-            role: dbUser.role_id === 1 ? Roles.Admin : Roles.Seller,
-            roleId: dbUser.role_id,
-            plan: dbUser.plan || 'starter',
-            status: dbUser.status || 'active',
-            restrictedReason: dbUser.restricted_reason || undefined,
-            cancelAtPeriodEnd: dbUser.cancel_at_period_end || false,
-            planPeriodEndsAt: dbUser.plan_period_ends_at || undefined,
-            phoneNumber: dbUser.phone_number || undefined,
-            address: dbUser.address || undefined,
-            deliveryNotes: dbUser.delivery_notes || undefined,
-            preferredPaymentMethod: dbUser.preferred_payment_method || undefined,
-            checkoutInfoUpdatedAt: dbUser.checkout_info_updated_at || undefined,
-            registeredStoreId: dbUser.registered_store_id || undefined,
-            lastActiveAt: now,
-            createdAt: dbUser.created_at || now,
-            updatedAt: dbUser.updated_at || now,
-          };
-          client.from('users').update({ last_active_at: now }).eq('id', authId).then();
-        } else {
+
           const displayName = authData.user.user_metadata?.name || normalizedEmail.split('@')[0];
           const fallbackUser: User = {
             id: authId,
@@ -1021,37 +1048,74 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             createdAt: now,
             updatedAt: now,
           };
-          const { data: createdRow, error: upsertErr } = await client
+          const { data: createdRow, error: insertErr } = await client
             .from('users')
-            .upsert(toDbUserRow(fallbackUser) as any, { onConflict: 'id' })
+            .insert(toDbUserRow(fallbackUser) as any)
             .select('*')
             .maybeSingle();
 
-          if (upsertErr || !createdRow) {
+          if (insertErr?.code === '23505') {
+            const { data: existingRow } = await client
+              .from('users')
+              .select('*')
+              .eq('id', authId)
+              .maybeSingle();
+            resolvedRow = existingRow;
+          } else if (insertErr || !createdRow) {
             await client.auth.signOut();
+            setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
             return {
               success: false,
-              error: `Database Error (public.users): ${upsertErr?.message || 'Account profile could not be read or created. Check RLS policies on public.users.'}`,
+              error: `Database Error (public.users): ${insertErr?.message || 'Account profile could not be read or created. Check RLS policies on public.users.'}`,
               isSystemError: true,
             };
+          } else {
+            resolvedRow = createdRow;
           }
+        }
 
-          activeUser = {
-            ...fallbackUser,
-            name: createdRow.name || displayName,
-            role: createdRow.role_id === 1 ? Roles.Admin : Roles.Seller,
-            roleId: createdRow.role_id,
-            plan: createdRow.plan || 'starter',
-            status: createdRow.status || 'active',
+        if (!resolvedRow || (resolvedRow.role_id !== 1 && resolvedRow.role_id !== 2)) {
+          await client.auth.signOut();
+          setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
+          return {
+            success: false,
+            error: 'Customer accounts cannot sign in on the main website. Please sign in through a store page instead.',
+            isSystemError: false,
           };
         }
 
+        const activeUser: User = {
+          id: resolvedRow.id,
+          name: resolvedRow.name || authData.user.user_metadata?.name || normalizedEmail.split('@')[0],
+          email: resolvedRow.email || normalizedEmail,
+          role: resolvedRow.role_id === 1 ? Roles.Admin : Roles.Seller,
+          roleId: resolvedRow.role_id,
+          plan: resolvedRow.plan || 'starter',
+          status: resolvedRow.status || 'active',
+          restrictedReason: resolvedRow.restricted_reason || undefined,
+          cancelAtPeriodEnd: resolvedRow.cancel_at_period_end || false,
+          planPeriodEndsAt: resolvedRow.plan_period_ends_at || undefined,
+          phoneNumber: resolvedRow.phone_number || undefined,
+          address: resolvedRow.address || undefined,
+          deliveryNotes: resolvedRow.delivery_notes || undefined,
+          preferredPaymentMethod: resolvedRow.preferred_payment_method || undefined,
+          checkoutInfoUpdatedAt: resolvedRow.checkout_info_updated_at || undefined,
+          registeredStoreId: resolvedRow.registered_store_id || undefined,
+          lastActiveAt: now,
+          createdAt: resolvedRow.created_at || now,
+          updatedAt: resolvedRow.updated_at || now,
+        };
+        client.from('users').update({ last_active_at: now }).eq('id', authId).then();
+
         setState((prev) => ({
           ...prev,
+          currentBuyer: null,
           currentUser: activeUser,
           users: [activeUser, ...(prev.users ?? []).filter((u) => u.id !== activeUser.id)],
         }));
 
+        authValidationLockRef.current = false;
+        hydrateSessionRef.current?.(authData.session);
         return { success: true, user: activeUser };
       } catch (err: any) {
         return {
@@ -1059,6 +1123,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           error: `Database connection error: ${err?.message || 'Sign in failed.'}`,
           isSystemError: true,
         };
+      } finally {
+        authValidationLockRef.current = false;
       }
     },
     []
@@ -1088,6 +1154,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         };
       }
 
+      authValidationLockRef.current = true;
       try {
         const { data: authData, error: authError } = await client.auth.signInWithPassword({
           email: normalizedEmail,
@@ -1111,14 +1178,21 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           .maybeSingle();
 
         if (dbErr) {
+          await client.auth.signOut();
+          setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
           return { success: false, error: `Database Error: ${dbErr.message}`, isSystemError: true };
         }
 
         if (!dbUser || dbUser.role_id !== 1) {
+          const isBuyerRole = dbUser?.role_id === 3 || authData.user.user_metadata?.account_type === 'buyer';
           await client.auth.signOut();
+          setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
           return {
             success: false,
-            error: 'Access denied: This account does not have administrator privileges.',
+            error: isBuyerRole
+              ? 'Access denied: Customer accounts cannot sign in to the Admin Console.'
+              : 'Access denied: This account does not have administrator privileges.',
+            isSystemError: false,
           };
         }
 
@@ -1140,10 +1214,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
         setState((prev) => ({
           ...prev,
+          currentBuyer: null,
           currentUser: adminUser,
           users: [adminUser, ...(prev.users ?? []).filter((u) => u.id !== adminUser.id)],
         }));
 
+        authValidationLockRef.current = false;
+        hydrateSessionRef.current?.(authData.session);
         return { success: true };
       } catch (err: any) {
         return {
@@ -1151,6 +1228,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           error: `Database connection error: ${err?.message || 'Failed to authenticate admin account.'}`,
           isSystemError: true,
         };
+      } finally {
+        authValidationLockRef.current = false;
       }
     },
     []
@@ -1236,6 +1315,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         };
       }
 
+      authValidationLockRef.current = true;
       try {
         const { data: authData, error: authError } = await client.auth.signUp({
           email: cleanEmail,
@@ -1258,6 +1338,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           return { success: false, error: 'Unable to create account. Please try again.', isSystemError: true };
         }
 
+        if (Array.isArray(authData.user.identities) && authData.user.identities.length === 0) {
+          return {
+            success: false,
+            error: 'An account with this email address already exists. Please sign in instead.',
+            isSystemError: false,
+          };
+        }
+
         const authId = authData.user.id;
         const now = new Date().toISOString();
 
@@ -1275,16 +1363,33 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
         const { error: dbError } = await client
           .from('users')
-          .upsert(buyerRow as any, { onConflict: 'id' });
+          .insert(buyerRow as any);
         if (dbError) {
           console.error('Supabase buyer insert error:', dbError);
           if (authData.session) {
-            await client.auth.signOut();
-            return {
-              success: false,
-              error: `Database Error (public.users): ${dbError.message}`,
-              isSystemError: true,
-            };
+            const { data: existingRow } = await client
+              .from('users')
+              .select('role_id')
+              .eq('id', authId)
+              .maybeSingle();
+            if (existingRow && existingRow.role_id !== 3) {
+              await client.auth.signOut();
+              setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
+              return {
+                success: false,
+                error: 'Merchant and admin accounts cannot register as a customer account.',
+                isSystemError: false,
+              };
+            }
+            if (!existingRow) {
+              await client.auth.signOut();
+              setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
+              return {
+                success: false,
+                error: `Database Error (public.users): ${dbError.message}`,
+                isSystemError: true,
+              };
+            }
           }
         }
 
@@ -1310,17 +1415,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
         setState((prev) => ({
           ...prev,
+          currentUser: null,
           buyers: [...(prev.buyers ?? []).filter((b) => b.id !== authId), newBuyer],
           currentBuyer: newBuyer,
         }));
 
+        authValidationLockRef.current = false;
+        hydrateSessionRef.current?.(authData.session);
         return { success: true, buyer: newBuyer };
       } catch (err: any) {
         return {
           success: false,
-          error: `Database connection error: ${err?.message || 'Failed to sign up buyer.'}`,
+          error: `Database connection error: ${err?.message || 'Failed to create customer account.'}`,
           isSystemError: true,
         };
+      } finally {
+        authValidationLockRef.current = false;
       }
     },
     []
@@ -1353,6 +1463,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         };
       }
 
+      authValidationLockRef.current = true;
       try {
         const { data: authData, error: authError } = await client.auth.signInWithPassword({
           email: cleanEmail,
@@ -1376,12 +1487,26 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           .maybeSingle();
 
         if (dbErr) {
+          await client.auth.signOut();
+          setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
           return { success: false, error: `Database Error: ${dbErr.message}`, isSystemError: true };
         }
 
         const now = new Date().toISOString();
         let activeDbBuyer = dbUser;
+
         if (!activeDbBuyer) {
+          const accountType = authData.user.user_metadata?.account_type;
+          if (accountType && accountType !== 'buyer') {
+            await client.auth.signOut();
+            setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
+            return {
+              success: false,
+              error: 'Merchant and admin accounts cannot sign in here. Please use a customer account.',
+              isSystemError: false,
+            };
+          }
+
           const displayName = authData.user.user_metadata?.name || cleanEmail.split('@')[0];
           const fallbackBuyer: BuyerAccount = {
             id: authId,
@@ -1392,20 +1517,51 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             createdAt: now,
             updatedAt: now,
           };
-          const { data: createdBuyerRow, error: buyerUpsertErr } = await client
+          const { data: createdBuyerRow, error: buyerInsertErr } = await client
             .from('users')
-            .upsert(toDbUserRow(fallbackBuyer) as any, { onConflict: 'id' })
+            .insert(toDbUserRow(fallbackBuyer) as any)
             .select('*')
             .maybeSingle();
-          if (buyerUpsertErr || !createdBuyerRow) {
+
+          if (buyerInsertErr?.code === '23505') {
+            const { data: existingRow } = await client
+              .from('users')
+              .select('*')
+              .eq('id', authId)
+              .maybeSingle();
+            activeDbBuyer = existingRow;
+          } else if (buyerInsertErr || !createdBuyerRow) {
             await client.auth.signOut();
+            setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
             return {
               success: false,
-              error: `Database Error (public.users): ${buyerUpsertErr?.message || 'Account profile could not be read or created.'}`,
+              error: `Database Error (public.users): ${buyerInsertErr?.message || 'Account profile could not be read or created.'}`,
               isSystemError: true,
             };
+          } else {
+            activeDbBuyer = createdBuyerRow;
           }
-          activeDbBuyer = createdBuyerRow;
+        }
+
+        // Strict role enforcement: storefront customer login only allows role_id === 3 (Buyer)
+        if (!activeDbBuyer || activeDbBuyer.role_id !== 3) {
+          await client.auth.signOut();
+          setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
+          return {
+            success: false,
+            error: 'Merchant and admin accounts cannot sign in here. Please use a customer account.',
+            isSystemError: false,
+          };
+        }
+
+        if (activeDbBuyer.status === 'restricted') {
+          await client.auth.signOut();
+          setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
+          return {
+            success: false,
+            error: activeDbBuyer.restricted_reason || 'This customer account has been restricted.',
+            isSystemError: false,
+          };
         }
 
         const buyer: BuyerAccount = {
@@ -1413,7 +1569,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           name: activeDbBuyer.name || authData.user.user_metadata?.name || cleanEmail.split('@')[0],
           email: activeDbBuyer.email || cleanEmail,
           role: Roles.Buyer,
-          roleId: activeDbBuyer.role_id ?? 3,
+          roleId: 3,
           storeId: activeDbBuyer.registered_store_id || undefined,
           savedCheckoutInfo:
             activeDbBuyer.phone_number || activeDbBuyer.address
@@ -1434,17 +1590,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
         setState((prev) => ({
           ...prev,
+          currentUser: null,
           currentBuyer: buyer,
           buyers: [...(prev.buyers ?? []).filter((b) => b.id !== authId), buyer],
         }));
 
+        authValidationLockRef.current = false;
+        hydrateSessionRef.current?.(authData.session);
         return { success: true, buyer };
       } catch (err: any) {
         return {
           success: false,
-          error: `Database connection error: ${err?.message || 'Failed to sign in buyer.'}`,
+          error: `Database connection error: ${err?.message || 'Failed to sign in.'}`,
           isSystemError: true,
         };
+      } finally {
+        authValidationLockRef.current = false;
       }
     },
     []
