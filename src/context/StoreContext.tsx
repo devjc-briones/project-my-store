@@ -1502,7 +1502,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
             return {
               success: false,
-              error: 'Merchant and admin accounts cannot sign in here. Please use a customer account.',
+              error: 'Invalid user credentials or the user is not existing',
               isSystemError: false,
             };
           }
@@ -1549,7 +1549,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
           return {
             success: false,
-            error: 'Merchant and admin accounts cannot sign in here. Please use a customer account.',
+            error: 'Invalid user credentials or the user is not existing',
             isSystemError: false,
           };
         }
