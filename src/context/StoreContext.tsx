@@ -659,7 +659,23 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
+      let lastHydrateAt = Date.now();
       hydrateFromSupabase();
+
+      const handleFocusOrVisible = () => {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+        const now = Date.now();
+        if (now - lastHydrateAt < 5000) return;
+        lastHydrateAt = now;
+        hydrateFromSupabase();
+      };
+
+      if (typeof window !== 'undefined') {
+        window.addEventListener('focus', handleFocusOrVisible);
+      }
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', handleFocusOrVisible);
+      }
 
       const { data: authListener } = client.auth.onAuthStateChange((event, session) => {
         if (event === 'SIGNED_OUT' || !session) {
@@ -672,12 +688,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             subscriptionTransactions: [],
           }));
         } else if (event === 'SIGNED_IN') {
+          lastHydrateAt = Date.now();
           hydrateFromSupabase(session);
         }
       });
 
       return () => {
         authListener?.subscription?.unsubscribe();
+        if (typeof window !== 'undefined') {
+          window.removeEventListener('focus', handleFocusOrVisible);
+        }
+        if (typeof document !== 'undefined') {
+          document.removeEventListener('visibilitychange', handleFocusOrVisible);
+        }
       };
     }, []);
 
@@ -2219,26 +2242,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         >
       >
     ) => {
-      setState((prev) => {
-        const nextUsers = (prev.users ?? []).map((u) =>
-          u.id === userId ? { ...u, ...updates } : u
-        );
-        const nextCurrentUser =
-          prev.currentUser?.id === userId
-            ? { ...prev.currentUser, ...updates }
-            : prev.currentUser;
-        const updated = nextUsers.find((u) => u.id === userId);
-        if (updated) {
-          notifySync(syncUserToSupabase(updated));
-        }
-        return {
-          ...prev,
-          users: nextUsers,
-          currentUser: nextCurrentUser,
-        };
-      });
+      const target = (state.users ?? []).find((u) => u.id === userId);
+      const updatedUser = target ? { ...target, ...updates, updatedAt: new Date().toISOString() } : undefined;
+      setState((prev) => ({
+        ...prev,
+        users: (prev.users ?? []).map((u) => (u.id === userId ? { ...u, ...updates } : u)),
+        currentUser:
+          prev.currentUser?.id === userId ? { ...prev.currentUser, ...updates } : prev.currentUser,
+      }));
+      if (updatedUser) {
+        notifySync(syncUserToSupabase(updatedUser));
+      }
     },
-    [notifySync]
+    [notifySync, state.users]
   );
 
   const adminDeleteUser = useCallback((userId: string) => {
@@ -2332,29 +2348,52 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const adminToggleSubscriptionTxStatus = useCallback(
     (txId: string, status: SubscriptionTransaction['status']) => {
-      setState((prev) => {
-        const nowIso = new Date().toISOString();
-        const nextPeriodEndIso = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-        const targetTx = (prev.subscriptionTransactions ?? []).find((t) => t.id === txId);
-        const nextTransactions = (prev.subscriptionTransactions ?? []).map((tx) =>
-          tx.id === txId
-            ? {
-                ...tx,
-                status,
-                periodStart: status === 'paid' ? tx.periodStart ?? nowIso : tx.periodStart,
-                periodEnd: status === 'paid' ? nextPeriodEndIso : tx.periodEnd,
-                approvedBy:
-                  status === 'paid' ? prev.currentUser?.id ?? tx.approvedBy : tx.approvedBy,
-                approvedAt: status === 'paid' ? nowIso : tx.approvedAt,
-                updatedAt: nowIso,
-              }
-            : tx
-        );
+      const nowIso = new Date().toISOString();
+      const nextPeriodEndIso = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      const targetTx = (state.subscriptionTransactions ?? []).find((t) => t.id === txId);
+      const updatedTx: SubscriptionTransaction | undefined = targetTx
+        ? {
+            ...targetTx,
+            status,
+            periodStart: status === 'paid' ? targetTx.periodStart ?? nowIso : targetTx.periodStart,
+            periodEnd: status === 'paid' ? nextPeriodEndIso : targetTx.periodEnd,
+            approvedBy:
+              status === 'paid' ? state.currentUser?.id ?? targetTx.approvedBy : targetTx.approvedBy,
+            approvedAt: status === 'paid' ? nowIso : targetTx.approvedAt,
+            updatedAt: nowIso,
+          }
+        : undefined;
 
-        const updatedTx = nextTransactions.find((t) => t.id === txId);
-        if (updatedTx) {
-          notifySync(syncSubscriptionToSupabase(updatedTx));
-        }
+      const matchesTxUser = (u: User) =>
+        Boolean(targetTx) &&
+        (u.id === targetTx!.userId ||
+          u.email.toLowerCase() === targetTx!.userEmail.toLowerCase());
+
+      const applyPaidToUser = (u: User): User => ({
+        ...u,
+        plan: targetTx!.planId,
+        status:
+          u.status === 'restricted' && u.restrictedReason?.includes('Subscription billing')
+            ? ('active' as const)
+            : u.status,
+        restrictedReason:
+          u.status === 'restricted' && u.restrictedReason?.includes('Subscription billing')
+            ? undefined
+            : u.restrictedReason,
+        cancelAtPeriodEnd: false,
+        planPeriodEndsAt: nextPeriodEndIso,
+        updatedAt: nowIso,
+      });
+
+      const updatedUsersToSync =
+        targetTx && status === 'paid'
+          ? (state.users ?? []).filter(matchesTxUser).map(applyPaidToUser)
+          : [];
+
+      setState((prev) => {
+        const nextTransactions = (prev.subscriptionTransactions ?? []).map((tx) =>
+          tx.id === txId && updatedTx ? updatedTx : tx
+        );
 
         if (!targetTx || status !== 'paid') {
           return {
@@ -2362,48 +2401,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             subscriptionTransactions: nextTransactions,
           };
         }
-        const matchesTxUser = (u: User) =>
-          u.id === targetTx.userId ||
-          u.email.toLowerCase() === targetTx.userEmail.toLowerCase();
 
         const nextUsers = (prev.users ?? []).map((u) =>
-          matchesTxUser(u)
-            ? {
-                ...u,
-                plan: targetTx.planId,
-                status:
-                  u.status === 'restricted' &&
-                  u.restrictedReason?.includes('Subscription billing')
-                    ? ('active' as const)
-                    : u.status,
-                restrictedReason:
-                  u.status === 'restricted' &&
-                  u.restrictedReason?.includes('Subscription billing')
-                    ? undefined
-                    : u.restrictedReason,
-                cancelAtPeriodEnd: false,
-                planPeriodEndsAt: nextPeriodEndIso,
-              }
-            : u
+          matchesTxUser(u) ? applyPaidToUser(u) : u
         );
         const nextCurrentUser =
           prev.currentUser && matchesTxUser(prev.currentUser)
-            ? {
-                ...prev.currentUser,
-                plan: targetTx.planId,
-                status:
-                  prev.currentUser.status === 'restricted' &&
-                  prev.currentUser.restrictedReason?.includes('Subscription billing')
-                    ? ('active' as const)
-                    : prev.currentUser.status,
-                restrictedReason:
-                  prev.currentUser.status === 'restricted' &&
-                  prev.currentUser.restrictedReason?.includes('Subscription billing')
-                    ? undefined
-                    : prev.currentUser.restrictedReason,
-                cancelAtPeriodEnd: false,
-                planPeriodEndsAt: nextPeriodEndIso,
-              }
+            ? applyPaidToUser(prev.currentUser)
             : prev.currentUser;
 
         return {
@@ -2413,8 +2417,42 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           subscriptionTransactions: nextTransactions,
         };
       });
+
+      if (updatedTx) {
+        notifySync(syncSubscriptionToSupabase(updatedTx));
+      }
+
+      if (targetTx && status === 'paid') {
+        if (updatedUsersToSync.length > 0) {
+          updatedUsersToSync.forEach((u) => {
+            notifySync(syncUserToSupabase(u));
+          });
+        } else if (isSupabaseConfigured) {
+          const client = getSupabaseClient();
+          if (client && targetTx.userId) {
+            client
+              .from('users')
+              .update({
+                plan: targetTx.planId,
+                cancel_at_period_end: false,
+                plan_period_ends_at: nextPeriodEndIso,
+                updated_at: nowIso,
+              } as any)
+              .eq('id', targetTx.userId)
+              .then(({ error }) => {
+                if (error) {
+                  pushToast({
+                    type: 'error',
+                    title: 'Database Error',
+                    description: `Failed to update user plan: ${error.message}`,
+                  });
+                }
+              });
+          }
+        }
+      }
     },
-    [notifySync]
+    [notifySync, pushToast, state.currentUser?.id, state.subscriptionTransactions, state.users]
   );
 
   const adminDeleteBuyer = useCallback((buyerId: string) => {
