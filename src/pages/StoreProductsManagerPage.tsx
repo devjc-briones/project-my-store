@@ -214,6 +214,7 @@ export function StoreProductsManagerPage() {
 
   const [draftPayments, setDraftPayments] = useState<PaymentSettings | null>(persistedSettings);
   const [hasUnsavedPayments, setHasUnsavedPayments] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     if (persistedSettings) {
@@ -312,27 +313,51 @@ export function StoreProductsManagerPage() {
     setDrawerOpen(true);
   };
 
-  const handleSaveProduct = (payload: Parameters<typeof ProductEditorDrawer>[0]['onSave'] extends (p: infer P) => void ? P : never) => {
-    if (editingProduct) {
-      updateProduct(editingProduct.id, payload);
-      pushToast({
-        type: 'success',
-        title: 'Product updated',
-        description: `${payload.name} saved with updated pricing.`,
-      });
-    } else {
-      createProduct({
-        storeId: store.id,
-        ...payload,
-      });
-      pushToast({
-        type: 'success',
-        title: 'Product added',
-        description: `${payload.name} is now in your store catalog.`,
-      });
+  const handleSaveProduct = async (
+    payload: Parameters<typeof ProductEditorDrawer>[0]['onSave'] extends (p: infer P) => void ? P : never
+  ) => {
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      if (editingProduct) {
+        const res = await updateProduct(editingProduct.id, payload);
+        if (!res.success) {
+          pushToast({
+            type: 'error',
+            title: 'Could not update product',
+            description: res.error || 'Failed to save product changes.',
+          });
+          return;
+        }
+        pushToast({
+          type: 'success',
+          title: 'Product updated',
+          description: `${payload.name} saved with updated pricing.`,
+        });
+      } else {
+        const res = await createProduct({
+          storeId: store.id,
+          ...payload,
+        });
+        if (!res.success) {
+          pushToast({
+            type: 'error',
+            title: 'Could not add product',
+            description: res.error || 'Failed to save new product.',
+          });
+          return;
+        }
+        pushToast({
+          type: 'success',
+          title: 'Product added',
+          description: `${payload.name} is now in your store catalog.`,
+        });
+      }
+      setDrawerOpen(false);
+      setEditingProduct(null);
+    } finally {
+      setIsSaving(false);
     }
-    setDrawerOpen(false);
-    setEditingProduct(null);
   };
 
   const handlePaymentDraftChange = (patch: Partial<PaymentSettings>) => {
@@ -340,17 +365,32 @@ export function StoreProductsManagerPage() {
     setHasUnsavedPayments(true);
   };
 
-  const handleSaveAllChanges = () => {
-    updatePaymentSettings(store.id, draftPayments);
-    setHasUnsavedPayments(false);
-    pushToast({
-      type: 'success',
-      title: 'All changes saved',
-      description: `Catalog and payment settings for ${store.name} have been saved.`,
-    });
+  const handleSaveAllChanges = async () => {
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      const res = await updatePaymentSettings(store.id, draftPayments);
+      if (!res.success) {
+        pushToast({
+          type: 'error',
+          title: 'Could not save changes',
+          description: res.error || 'Failed to save payment & checkout settings.',
+        });
+        return;
+      }
+      setHasUnsavedPayments(false);
+      pushToast({
+        type: 'success',
+        title: 'All changes saved',
+        description: `Catalog and payment settings for ${store.name} have been saved.`,
+      });
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  const handlePublishUpdates = () => {
+  const handlePublishUpdates = async () => {
+    if (isSaving) return;
     if (store.status === 'restricted') {
       pushToast({
         type: 'error',
@@ -361,27 +401,52 @@ export function StoreProductsManagerPage() {
       });
       return;
     }
-    const wasDraft = store.status === 'draft';
-    const owner =
-      (state.users ?? []).find((u) => u.id === store.ownerId) ??
-      (state.currentUser?.id === store.ownerId ? state.currentUser : undefined);
-    const ownerPastDue = isUserPlanPastDue(owner);
-    updatePaymentSettings(store.id, draftPayments);
-    updateStoreMeta(store.id, { status: 'published' });
-    setHasUnsavedPayments(false);
-    pushToast({
-      type: ownerPastDue ? 'info' : 'success',
-      title: ownerPastDue
-        ? 'Changes saved (Shop closed until paid)'
-        : wasDraft
-          ? 'Store published live!'
-          : 'Updates published live!',
-      description: ownerPastDue
-        ? `${store.name} stays temporarily closed to buyers until your due plan payment is approved.`
-        : wasDraft
-          ? `${store.domainUrl} is live — your Store Overview Dashboard is now unlocked.`
-          : `${store.domainUrl} is live with your latest products and fees.`,
-    });
+
+    setIsSaving(true);
+    try {
+      const wasDraft = store.status === 'draft';
+      const owner =
+        (state.users ?? []).find((u) => u.id === store.ownerId) ??
+        (state.currentUser?.id === store.ownerId ? state.currentUser : undefined);
+      const ownerPastDue = isUserPlanPastDue(owner);
+
+      const payRes = await updatePaymentSettings(store.id, draftPayments);
+      if (!payRes.success) {
+        pushToast({
+          type: 'error',
+          title: 'Could not publish store',
+          description: payRes.error || 'Failed to save payment settings.',
+        });
+        return;
+      }
+
+      const metaRes = await updateStoreMeta(store.id, { status: 'published' });
+      if (!metaRes.success) {
+        pushToast({
+          type: 'error',
+          title: 'Could not publish store',
+          description: metaRes.error || 'Failed to publish store status.',
+        });
+        return;
+      }
+
+      setHasUnsavedPayments(false);
+      pushToast({
+        type: ownerPastDue ? 'info' : 'success',
+        title: ownerPastDue
+          ? 'Changes saved (Shop closed until paid)'
+          : wasDraft
+            ? 'Store published live!'
+            : 'Updates published live!',
+        description: ownerPastDue
+          ? `${store.name} stays temporarily closed to buyers until your due plan payment is approved.`
+          : wasDraft
+            ? `${store.domainUrl} is live — your Store Overview Dashboard is now unlocked.`
+            : `${store.domainUrl} is live with your latest products and fees.`,
+      });
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleUpdateOrderStatus = (
@@ -960,8 +1025,18 @@ export function StoreProductsManagerPage() {
                           <div className="px-4 py-3 bg-slate-50 border-t border-slate-200/80 flex items-center justify-between gap-2">
                             <button
                               type="button"
-                              onClick={() => {
-                                updateProduct(product.id, { isAvailable: !product.isAvailable });
+                              onClick={async () => {
+                                const res = await updateProduct(product.id, {
+                                  isAvailable: !product.isAvailable,
+                                });
+                                if (!res.success) {
+                                  pushToast({
+                                    type: 'error',
+                                    title: 'Update failed',
+                                    description: res.error || 'Could not update availability.',
+                                  });
+                                  return;
+                                }
                                 pushToast({
                                   type: 'info',
                                   title: !product.isAvailable
@@ -992,9 +1067,17 @@ export function StoreProductsManagerPage() {
                               {confirmDeleteId === product.id ? (
                                 <button
                                   type="button"
-                                  onClick={() => {
-                                    deleteProduct(product.id);
+                                  onClick={async () => {
+                                    const res = await deleteProduct(product.id);
                                     setConfirmDeleteId(null);
+                                    if (!res.success) {
+                                      pushToast({
+                                        type: 'error',
+                                        title: 'Delete failed',
+                                        description: res.error || 'Could not delete product.',
+                                      });
+                                      return;
+                                    }
                                     pushToast({
                                       type: 'info',
                                       title: 'Product deleted',
@@ -1070,19 +1153,21 @@ export function StoreProductsManagerPage() {
               <button
                 type="button"
                 onClick={handleSaveAllChanges}
-                className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 min-h-[42px] px-4 py-2 text-xs sm:text-sm font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors whitespace-nowrap cursor-pointer"
+                disabled={isSaving}
+                className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 min-h-[42px] px-4 py-2 text-xs sm:text-sm font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 disabled:opacity-60 rounded-xl transition-colors whitespace-nowrap cursor-pointer"
               >
                 <Save className="w-4 h-4 shrink-0" />
-                <span>Save All Changes</span>
+                <span>{isSaving ? 'Saving...' : 'Save All Changes'}</span>
               </button>
 
               <button
                 type="button"
                 onClick={handlePublishUpdates}
-                className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 min-h-[42px] px-4 sm:px-5 py-2 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl transition-colors whitespace-nowrap cursor-pointer"
+                disabled={isSaving}
+                className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 min-h-[42px] px-4 sm:px-5 py-2 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-60 rounded-xl transition-colors whitespace-nowrap cursor-pointer"
               >
                 <Send className="w-4 h-4 shrink-0" />
-                <span>Publish Updates</span>
+                <span>{isSaving ? 'Publishing...' : 'Publish Updates'}</span>
               </button>
             </div>
           </div>

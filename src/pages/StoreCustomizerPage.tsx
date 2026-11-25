@@ -225,7 +225,6 @@ export function StoreCustomizerPage() {
     goBack,
     createStore,
     updateStoreMeta,
-    updateStoreBranding,
     getStoreProducts,
     getPaymentSettings,
     pushToast,
@@ -253,6 +252,7 @@ export function StoreCustomizerPage() {
   const [mobileSheetSection, setMobileSheetSection] = useState<CustomizerSectionId | null>(null);
   const [previewViewport, setPreviewViewport] = useState<'desktop' | 'mobile'>('desktop');
   const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [customLogoUrl, setCustomLogoUrl] = useState<string | null>(() => {
     const initialLogo = !isCreateMode && existingStore ? existingStore.branding.logoImageUrl : undefined;
@@ -692,7 +692,9 @@ export function StoreCustomizerPage() {
     }
   };
 
-  const handleSaveChanges = () => {
+  const handleSaveChanges = async () => {
+    if (isSaving) return;
+
     if (
       !isProUser &&
       isProTemplate(draftStore.templateId) &&
@@ -730,64 +732,69 @@ export function StoreCustomizerPage() {
       return;
     }
 
-    if (isCreateMode) {
-      const created = createStore({
+    setIsSaving(true);
+    try {
+      if (isCreateMode) {
+        const created = await createStore({
+          name: trimmedName,
+          customSlug: slugValidation.normalizedSlug,
+          templateId: draftStore.templateId,
+          status: 'draft',
+          branding: draftStore.branding,
+        });
+
+        if (created.error || !created.store) {
+          setValidationError(created.error ?? 'Could not create store.');
+          focusBasicSection();
+          pushToast({
+            type: 'error',
+            title: 'Could not save store',
+            description: created.error,
+          });
+          return;
+        }
+
+        closeMobileSheet();
+        pushToast({
+          type: 'success',
+          title: 'Store created & changes saved!',
+          description: `${created.store.name} (${created.store.domainUrl}) is saved.`,
+        });
+        navigate({ name: 'store-customize', storeId: created.store.id }, { replace: true });
+        return;
+      }
+
+      if (!existingStore) return;
+
+      const metaResult = await updateStoreMeta(existingStore.id, {
         name: trimmedName,
-        customSlug: slugValidation.normalizedSlug,
+        slug: slugValidation.normalizedSlug,
+        status: existingStore.status,
         templateId: draftStore.templateId,
-        status: 'draft',
         branding: draftStore.branding,
       });
 
-      if (created.error || !created.store) {
-        setValidationError(created.error ?? 'Could not create store.');
+      if (!metaResult.success) {
+        setValidationError(metaResult.error ?? 'Could not update store details.');
         focusBasicSection();
         pushToast({
           type: 'error',
-          title: 'Could not save store',
-          description: created.error,
+          title: 'Update failed',
+          description: metaResult.error,
         });
         return;
       }
 
       closeMobileSheet();
+
       pushToast({
         type: 'success',
-        title: 'Store created & changes saved!',
-        description: `${created.store.name} (${created.store.domainUrl}) is saved.`,
+        title: 'Store UI changes saved!',
+        description: `All appearance updates for ${trimmedName} have been saved.`,
       });
-      navigate({ name: 'store-customize', storeId: created.store.id }, { replace: true });
-      return;
+    } finally {
+      setIsSaving(false);
     }
-
-    if (!existingStore) return;
-
-    const metaResult = updateStoreMeta(existingStore.id, {
-      name: trimmedName,
-      slug: slugValidation.normalizedSlug,
-      status: existingStore.status,
-      templateId: draftStore.templateId,
-    });
-
-    if (!metaResult.success) {
-      setValidationError(metaResult.error ?? 'Could not update store details.');
-      focusBasicSection();
-      pushToast({
-        type: 'error',
-        title: 'Update failed',
-        description: metaResult.error,
-      });
-      return;
-    }
-
-    updateStoreBranding(existingStore.id, draftStore.branding);
-    closeMobileSheet();
-
-    pushToast({
-      type: 'success',
-      title: 'Store UI changes saved!',
-      description: `All appearance updates for ${trimmedName} have been saved.`,
-    });
   };
 
   const activeTemplateMeta = INDUSTRY_TEMPLATES[draftStore.templateId];
@@ -1633,10 +1640,11 @@ export function StoreCustomizerPage() {
         <button
           type="button"
           onClick={handleSaveChanges}
-          className="inline-flex items-center gap-1.5 min-h-[40px] px-4 sm:px-5 py-2 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl shadow-sm transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          disabled={isSaving}
+          className="inline-flex items-center gap-1.5 min-h-[40px] px-4 sm:px-5 py-2 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-60 rounded-xl shadow-sm transition-colors whitespace-nowrap shrink-0 cursor-pointer"
         >
           <Save className="w-4 h-4 shrink-0" />
-          <span>Save Changes</span>
+          <span>{isSaving ? 'Saving...' : 'Save Changes'}</span>
         </button>
       </header>
       <div className="h-16 shrink-0" aria-hidden="true" />

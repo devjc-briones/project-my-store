@@ -23,6 +23,7 @@ import {
   formatCurrency,
   getCurrencySymbol,
 } from '../../utils/pricing';
+import { generateUuid } from '../../utils/supabaseClient';
 
 interface ProductEditorDrawerProps {
   isOpen: boolean;
@@ -230,8 +231,8 @@ export function ProductEditorDrawer({
   };
 
   const handleApplyVariantPreset = (attribute: string, values: string[]) => {
-    const nextRows: ProductVariant[] = values.map((val, idx) => ({
-      id: `var_${Date.now()}_${idx}`,
+    const nextRows: ProductVariant[] = values.map((val) => ({
+      id: generateUuid(),
       label: val,
       attributeName: attribute,
       value: val,
@@ -245,7 +246,7 @@ export function ProductEditorDrawer({
     setVariants((prev) => [
       ...prev,
       {
-        id: `var_${Date.now()}_${prev.length}`,
+        id: generateUuid(),
         label: '',
         attributeName: 'Option',
         value: '',

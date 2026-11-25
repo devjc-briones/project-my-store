@@ -208,9 +208,17 @@ export function AdminPage() {
     });
   };
 
-  const handleDeleteUser = (userId: string) => {
+  const handleDeleteUser = async (userId: string) => {
     const target = users.find((u) => u.id === userId);
-    adminDeleteUser(userId);
+    const res = await adminDeleteUser(userId);
+    if (!res.success) {
+      pushToast({
+        type: 'error',
+        title: 'Could not delete user',
+        description: res.error || 'Failed to delete user from database.',
+      });
+      return;
+    }
     pushToast({
       type: 'success',
       title: 'User deleted',
@@ -218,11 +226,19 @@ export function AdminPage() {
     });
   };
 
-  const handleChangeStoreStatus = (store: Store, nextStatus: StoreStatus, reason?: string) => {
-    adminUpdateStore(store.id, {
+  const handleChangeStoreStatus = async (store: Store, nextStatus: StoreStatus, reason?: string) => {
+    const res = await adminUpdateStore(store.id, {
       status: nextStatus,
       restrictedReason: nextStatus === 'restricted' ? reason : undefined,
     });
+    if (!res.success) {
+      pushToast({
+        type: 'error',
+        title: 'Could not update store',
+        description: res.error || 'Failed to update store status in database.',
+      });
+      return;
+    }
     const labelMap: Record<StoreStatus, string> = {
       published: 'published live',
       draft: store.status === 'restricted' ? 'restored to draft' : 'unpublished to draft',
@@ -240,9 +256,17 @@ export function AdminPage() {
     });
   };
 
-  const handleDeleteStore = (storeId: string) => {
+  const handleDeleteStore = async (storeId: string) => {
     const target = state.stores.find((s) => s.id === storeId);
-    deleteStore(storeId);
+    const res = await deleteStore(storeId);
+    if (!res.success) {
+      pushToast({
+        type: 'error',
+        title: 'Could not delete store',
+        description: res.error || 'Failed to delete store from database.',
+      });
+      return;
+    }
     pushToast({
       type: 'success',
       title: 'Store deleted',

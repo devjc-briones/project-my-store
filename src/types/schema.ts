@@ -267,6 +267,7 @@ export type OrderFulfillmentStatus =
 
 export interface CustomerOrder {
   id: string;
+  dbId?: string;
   storeId: string;
   storeName?: string;
   buyerId?: string;

@@ -164,9 +164,9 @@ export function buildRoutePath(route: AppRoute): string {
     case 'store-payments':
       return `/store/${route.storeId}/payments`;
     case 'storefront':
-      if (route.view === 'products') return `/shop/${route.storeSlug}/products`;
-      if (route.view === 'info-settings') return `/shop/${route.storeSlug}/information-settings`;
-      return `/shop/${route.storeSlug}`;
+      if (route.view === 'products') return `/${route.storeSlug}/products`;
+      if (route.view === 'info-settings') return `/${route.storeSlug}/information-settings`;
+      return `/${route.storeSlug}`;
     case 'not-found':
       return route.path;
   }

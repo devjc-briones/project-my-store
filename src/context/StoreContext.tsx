@@ -38,6 +38,11 @@ import {
   toDbUserRow,
 } from '../utils/supabaseMappers';
 import {
+  deleteProductFromSupabase,
+  deleteStoreFromSupabase,
+  deleteUserFromSupabase,
+  syncOrderPaymentStatusToSupabase,
+  syncOrderStatusToSupabase,
   syncOrderToSupabase,
   syncPaymentSettingsToSupabase,
   syncPlatformChannelsToSupabase,
@@ -46,7 +51,7 @@ import {
   syncSubscriptionToSupabase,
   syncUserToSupabase,
 } from '../utils/supabaseSync';
-import { formatAuthError, generateUuid, getSupabaseClient, getSupabaseConfigStatus, isSupabaseConfigured } from '../utils/supabaseClient';
+import { formatAuthError, generateUuid, getSupabaseClient, getSupabaseConfigStatus, isSupabaseConfigured, isUuid } from '../utils/supabaseClient';
 import { AppRoute, buildRoutePath, parseRoute } from '../router/routes';
 
 const STORAGE_KEY = 'mystore_saas_state_v2';
@@ -106,7 +111,7 @@ interface StoreContextValue {
 
   // Store actions
   setActiveStore: (storeId: string | null) => void;
-  createStore: (input: CreateStoreInput) => { store?: Store; error?: string };
+  createStore: (input: CreateStoreInput) => Promise<{ store?: Store; error?: string }>;
   updateStoreMeta: (
     storeId: string,
     updates: {
@@ -114,21 +119,33 @@ interface StoreContextValue {
       slug?: string;
       status?: Store['status'];
       templateId?: IndustryTemplateId;
+      branding?: StoreBranding;
     }
-  ) => { success: boolean; error?: string };
-  updateStoreBranding: (storeId: string, brandingUpdates: Partial<StoreBranding>) => void;
-  deleteStore: (storeId: string) => void;
+  ) => Promise<{ success: boolean; error?: string }>;
+  updateStoreBranding: (
+    storeId: string,
+    brandingUpdates: Partial<StoreBranding>
+  ) => Promise<{ success: boolean; error?: string }>;
+  deleteStore: (storeId: string) => Promise<{ success: boolean; error?: string }>;
   getStoreBySlug: (slug: string) => Store | undefined;
 
   // Product actions
   getStoreProducts: (storeId: string) => Product[];
-  createProduct: (input: CreateProductInput) => Product;
-  updateProduct: (productId: string, updates: Partial<Omit<Product, 'id' | 'storeId'>>) => void;
-  deleteProduct: (productId: string) => void;
+  createProduct: (
+    input: CreateProductInput
+  ) => Promise<{ success: boolean; product?: Product; error?: string }>;
+  updateProduct: (
+    productId: string,
+    updates: Partial<Omit<Product, 'id' | 'storeId'>>
+  ) => Promise<{ success: boolean; error?: string }>;
+  deleteProduct: (productId: string) => Promise<{ success: boolean; error?: string }>;
 
   // Payment settings actions
   getPaymentSettings: (storeId: string) => PaymentSettings;
-  updatePaymentSettings: (storeId: string, updates: Partial<PaymentSettings>) => void;
+  updatePaymentSettings: (
+    storeId: string,
+    updates: Partial<PaymentSettings>
+  ) => Promise<{ success: boolean; error?: string }>;
 
   // Customer order actions
   getStoreOrders: (storeId: string) => CustomerOrder[];
@@ -183,7 +200,7 @@ interface StoreContextValue {
       >
     >
   ) => void;
-  adminDeleteUser: (userId: string) => void;
+  adminDeleteUser: (userId: string) => Promise<{ success: boolean; error?: string }>;
   adminUpdateStore: (
     storeId: string,
     updates: {
@@ -193,7 +210,7 @@ interface StoreContextValue {
       restrictedReason?: string;
       templateId?: IndustryTemplateId;
     }
-  ) => { success: boolean; error?: string };
+  ) => Promise<{ success: boolean; error?: string }>;
   adminToggleSubscriptionTxStatus: (
     txId: string,
     status: SubscriptionTransaction['status']
@@ -351,7 +368,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             ownerId: s.user_id,
             name: s.name,
             slug: s.slug,
-            domainUrl: s.domain_url,
+            domainUrl: buildStoreDomainUrl(s.slug),
             templateId: s.template_id,
             status: s.status,
             restrictedReason: s.restricted_reason || undefined,
@@ -503,6 +520,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             const methodKey = payInfo.method_key || 'cod';
             return {
               id: o.order_code || o.id,
+              dbId: o.id,
               storeId: o.store_id,
               buyerId: o.user_id || undefined,
               customerName: o.customer_name,
@@ -1591,7 +1609,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const createStore = useCallback(
-    (input: CreateStoreInput): { store?: Store; error?: string } => {
+    async (input: CreateStoreInput): Promise<{ store?: Store; error?: string }> => {
       if (state.currentUser?.status === 'restricted') {
         return {
           error: 'Your merchant account is currently restricted. Contact platform admin.',
@@ -1643,7 +1661,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       const now = new Date().toISOString();
       const templateMeta = INDUSTRY_TEMPLATES[input.templateId];
-      const newStoreId = generateId('str');
+      const newStoreId = generateUuid();
 
       const newStore: Store = {
         id: newStoreId,
@@ -1686,34 +1704,51 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         updatedAt: now,
       };
 
+      const defaultPayments = createDefaultPaymentSettings(newStoreId);
+
+      // Step 1: Persist store record first so child tables satisfy FK & RLS cleanly
+      const storeRes = await syncStoreToSupabase(newStore);
+      if (!storeRes.success) {
+        return { error: storeRes.error || 'Could not save store to database.' };
+      }
+
+      // Step 2: Dynamically seed checkout & payment settings from app (no DB trigger required)
+      const payRes = await syncPaymentSettingsToSupabase(defaultPayments);
+      if (!payRes.success) {
+        await deleteStoreFromSupabase(newStoreId);
+        return {
+          error:
+            payRes.error ||
+            'Could not save default store checkout & payment settings to database.',
+        };
+      }
+
       setState((prev) => ({
         ...prev,
         stores: [newStore, ...prev.stores],
         paymentSettingsByStore: {
           ...prev.paymentSettingsByStore,
-          [newStoreId]: createDefaultPaymentSettings(newStoreId),
+          [newStoreId]: defaultPayments,
         },
         activeStoreId: newStoreId,
       }));
 
-      notifySync(syncStoreToSupabase(newStore));
-      notifySync(syncPaymentSettingsToSupabase(createDefaultPaymentSettings(newStoreId)));
-
       return { store: newStore };
     },
-    [notifySync, state.currentUser?.id, state.currentUser?.plan, state.currentUser?.role, state.currentUser?.status, state.stores]
+    [state.currentUser, state.stores]
   );
 
   const updateStoreMeta = useCallback(
-    (
+    async (
       storeId: string,
       updates: {
         name?: string;
         slug?: string;
         status?: Store['status'];
         templateId?: IndustryTemplateId;
+        branding?: StoreBranding;
       }
-    ): { success: boolean; error?: string } => {
+    ): Promise<{ success: boolean; error?: string }> => {
       const target = state.stores.find((s) => s.id === storeId);
       if (!target) {
         return { success: false, error: 'Store not found.' };
@@ -1758,54 +1793,68 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       }
 
       const now = new Date().toISOString();
-      const updatedStore = {
+      const updatedStore: Store = {
         ...target,
         name: updates.name !== undefined ? updates.name.trim() : target.name,
         slug: nextSlug,
         domainUrl: buildStoreDomainUrl(nextSlug),
         status: updates.status ?? target.status,
         templateId: updates.templateId ?? target.templateId,
+        branding: updates.branding ? { ...target.branding, ...updates.branding } : target.branding,
         updatedAt: now,
       };
+
+      const res = await syncStoreToSupabase(updatedStore);
+      if (!res.success) {
+        return { success: false, error: res.error || 'Could not update store in database.' };
+      }
 
       setState((prev) => ({
         ...prev,
         stores: prev.stores.map((s) => (s.id === storeId ? updatedStore : s)),
       }));
 
-      notifySync(syncStoreToSupabase(updatedStore));
       return { success: true };
     },
-    [notifySync, state.currentUser?.plan, state.currentUser?.role, state.stores]
+    [state.currentUser?.plan, state.currentUser?.role, state.stores]
   );
 
   const updateStoreBranding = useCallback(
-    (storeId: string, brandingUpdates: Partial<StoreBranding>) => {
+    async (
+      storeId: string,
+      brandingUpdates: Partial<StoreBranding>
+    ): Promise<{ success: boolean; error?: string }> => {
+      const target = state.stores.find((s) => s.id === storeId);
+      if (!target) {
+        return { success: false, error: 'Store not found.' };
+      }
       const now = new Date().toISOString();
-      setState((prev) => {
-        const nextStores = prev.stores.map((s) =>
-          s.id === storeId
-            ? {
-                ...s,
-                branding: { ...s.branding, ...brandingUpdates },
-                updatedAt: now,
-              }
-            : s
-        );
-        const updated = nextStores.find((s) => s.id === storeId);
-        if (updated) {
-          notifySync(syncStoreToSupabase(updated));
-        }
-        return {
-          ...prev,
-          stores: nextStores,
-        };
-      });
+      const updatedStore: Store = {
+        ...target,
+        branding: { ...target.branding, ...brandingUpdates },
+        updatedAt: now,
+      };
+
+      const res = await syncStoreToSupabase(updatedStore);
+      if (!res.success) {
+        return { success: false, error: res.error || 'Could not save store branding.' };
+      }
+
+      setState((prev) => ({
+        ...prev,
+        stores: prev.stores.map((s) => (s.id === storeId ? updatedStore : s)),
+      }));
+      return { success: true };
     },
-    [notifySync]
+    [state.stores]
   );
 
-  const deleteStore = useCallback((storeId: string) => {
+  const deleteStore = useCallback(async (storeId: string): Promise<{ success: boolean; error?: string }> => {
+    const res = await deleteStoreFromSupabase(storeId);
+    if (!res.success) {
+      return { success: false, error: res.error || 'Could not delete store from database.' };
+    }
+
     setState((prev) => {
       const nextStores = prev.stores.filter((s) => s.id !== storeId);
       const nextProducts = prev.products.filter((p) => p.storeId !== storeId);
@@ -1822,12 +1871,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           prev.activeStoreId === storeId ? nextStores[0]?.id ?? null : prev.activeStoreId,
       };
     });
-    if (isSupabaseConfigured) {
-      const client = getSupabaseClient();
-      if (client) {
-        client.from('stores').delete().eq('id', storeId).then();
-      }
-    }
+    return { success: true };
   }, []);
 
   const getStoreBySlug = useCallback(
@@ -1841,7 +1885,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const createProduct = useCallback(
-    (input: CreateProductInput): Product => {
+    async (
+      input: CreateProductInput
+    ): Promise<{ success: boolean; product?: Product; error?: string }> => {
       const now = new Date().toISOString();
       const safeBasePrice = clampNonNegative(input.basePrice);
       const safeCostPrice =
@@ -1877,12 +1923,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       const normalizedVariants = (input.variants ?? []).map((v, idx) => ({
         ...v,
+        id: isUuid(v.id) ? v.id : generateUuid(),
         stock: clampStock(v.stock),
         sortOrder: v.sortOrder ?? idx,
       }));
 
       const product: Product = {
-        id: generateId('prd'),
+        id: generateUuid(),
         storeId: input.storeId,
         name: input.name.trim(),
         description: input.description.trim(),
@@ -1903,98 +1950,113 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         updatedAt: now,
       };
 
+      const res = await syncProductToSupabase(product);
+      if (!res.success) {
+        return { success: false, error: res.error || 'Could not save product to database.' };
+      }
+
       setState((prev) => ({
         ...prev,
         products: [product, ...prev.products],
       }));
 
-      notifySync(syncProductToSupabase(product));
-      return product;
+      return { success: true, product };
     },
-    [notifySync, state.products]
+    [state.products]
   );
 
   const updateProduct = useCallback(
-    (productId: string, updates: Partial<Omit<Product, 'id' | 'storeId'>>) => {
+    async (
+      productId: string,
+      updates: Partial<Omit<Product, 'id' | 'storeId'>>
+    ): Promise<{ success: boolean; error?: string }> => {
+      const p = state.products.find((item) => item.id === productId);
+      if (!p) {
+        return { success: false, error: 'Product not found.' };
+      }
+
       const now = new Date().toISOString();
+      const nextBase = clampNonNegative(updates.basePrice ?? p.basePrice);
+      const nextDiscountType: DiscountType =
+        updates.discountType ??
+        p.discountType ??
+        ((updates.discountPercent ?? p.discountPercent) > 0 ? 'percentage' : 'none');
+      const rawNextDiscountValue =
+        updates.discountValue ??
+        (updates.discountPercent !== undefined && nextDiscountType === 'percentage'
+          ? updates.discountPercent
+          : p.discountValue ?? p.discountPercent);
+      const nextDiscountValue =
+        nextDiscountType === 'percentage'
+          ? clampPercent(rawNextDiscountValue, 95)
+          : clampNonNegative(rawNextDiscountValue);
+      const rawCostPrice = 'costPrice' in updates ? updates.costPrice : p.costPrice;
+      const nextCostPrice =
+        rawCostPrice !== undefined ? clampNonNegative(rawCostPrice) : undefined;
+
+      const smart = calculateSmartPricing({
+        basePrice: nextBase,
+        discountType: nextDiscountType,
+        discountValue: nextDiscountValue,
+        costPrice: nextCostPrice,
+      });
+
+      const nextSku =
+        updates.sku !== undefined && updates.sku.trim().length > 0
+          ? updates.sku.trim()
+          : p.sku;
+
+      const nextVariants = updates.variants
+        ? updates.variants.map((v, idx) => ({
+            ...v,
+            id: isUuid(v.id) ? v.id : generateUuid(),
+            stock: clampStock(v.stock),
+            sortOrder: v.sortOrder ?? idx,
+          }))
+        : p.variants;
+
+      const updated: Product = {
+        ...p,
+        ...updates,
+        name: updates.name !== undefined ? updates.name.trim() || p.name : p.name,
+        category:
+          updates.category !== undefined ? updates.category.trim() || 'General' : p.category,
+        sku: nextSku,
+        stock: updates.stock !== undefined ? clampStock(updates.stock) : p.stock,
+        variants: nextVariants,
+        basePrice: nextBase,
+        discountType: nextDiscountType,
+        discountValue: nextDiscountValue,
+        discountPercent: clampPercent(Math.round(smart.effectiveDiscountPercent), 95),
+        costPrice: nextCostPrice,
+        finalPrice: clampNonNegative(smart.finalPrice),
+        updatedAt: now,
+      };
+
+      const res = await syncProductToSupabase(updated);
+      if (!res.success) {
+        return { success: false, error: res.error || 'Could not update product in database.' };
+      }
+
       setState((prev) => ({
         ...prev,
-        products: prev.products.map((p) => {
-          if (p.id !== productId) return p;
-          const nextBase = clampNonNegative(updates.basePrice ?? p.basePrice);
-          const nextDiscountType: DiscountType =
-            updates.discountType ??
-            p.discountType ??
-            ((updates.discountPercent ?? p.discountPercent) > 0 ? 'percentage' : 'none');
-          const rawNextDiscountValue =
-            updates.discountValue ??
-            (updates.discountPercent !== undefined && nextDiscountType === 'percentage'
-              ? updates.discountPercent
-              : p.discountValue ?? p.discountPercent);
-          const nextDiscountValue =
-            nextDiscountType === 'percentage'
-              ? clampPercent(rawNextDiscountValue, 95)
-              : clampNonNegative(rawNextDiscountValue);
-          const rawCostPrice = 'costPrice' in updates ? updates.costPrice : p.costPrice;
-          const nextCostPrice =
-            rawCostPrice !== undefined ? clampNonNegative(rawCostPrice) : undefined;
-
-          const smart = calculateSmartPricing({
-            basePrice: nextBase,
-            discountType: nextDiscountType,
-            discountValue: nextDiscountValue,
-            costPrice: nextCostPrice,
-          });
-
-          const nextSku =
-            updates.sku !== undefined && updates.sku.trim().length > 0
-              ? updates.sku.trim()
-              : p.sku;
-
-          const nextVariants = updates.variants
-            ? updates.variants.map((v, idx) => ({
-                ...v,
-                stock: clampStock(v.stock),
-                sortOrder: v.sortOrder ?? idx,
-              }))
-            : p.variants;
-
-          const updated = {
-            ...p,
-            ...updates,
-            name: updates.name !== undefined ? updates.name.trim() || p.name : p.name,
-            category:
-              updates.category !== undefined ? updates.category.trim() || 'General' : p.category,
-            sku: nextSku,
-            stock: updates.stock !== undefined ? clampStock(updates.stock) : p.stock,
-            variants: nextVariants,
-            basePrice: nextBase,
-            discountType: nextDiscountType,
-            discountValue: nextDiscountValue,
-            discountPercent: clampPercent(Math.round(smart.effectiveDiscountPercent), 95),
-            costPrice: nextCostPrice,
-            finalPrice: clampNonNegative(smart.finalPrice),
-            updatedAt: now,
-          };
-          notifySync(syncProductToSupabase(updated));
-          return updated;
-        }),
+        products: prev.products.map((item) => (item.id === productId ? updated : item)),
       }));
+      return { success: true };
     },
-    [notifySync]
+    [state.products]
   );
 
-  const deleteProduct = useCallback((productId: string) => {
+  const deleteProduct = useCallback(async (productId: string): Promise<{ success: boolean; error?: string }> => {
+    const res = await deleteProductFromSupabase(productId);
+    if (!res.success) {
+      return { success: false, error: res.error || 'Could not delete product from database.' };
+    }
     setState((prev) => ({
       ...prev,
       products: prev.products.filter((p) => p.id !== productId),
     }));
-    if (isSupabaseConfigured) {
-      const client = getSupabaseClient();
-      if (client) {
-        client.from('store_products').delete().eq('id', productId).then();
-      }
-    }
+    return { success: true };
   }, []);
 
   const getPaymentSettings = useCallback(
@@ -2004,36 +2066,47 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const updatePaymentSettings = useCallback(
-    (storeId: string, updates: Partial<PaymentSettings>) => {
+    async (
+      storeId: string,
+      updates: Partial<PaymentSettings>
+    ): Promise<{ success: boolean; error?: string }> => {
       const now = new Date().toISOString();
-      setState((prev) => {
-        const current = prev.paymentSettingsByStore[storeId] ?? createDefaultPaymentSettings(storeId);
-        const merged: PaymentSettings = {
-          ...current,
-          ...updates,
-          storeId,
-          taxPercent: clampPercent(updates.taxPercent ?? current.taxPercent, 100),
-          serviceChargePercent: clampPercent(
-            updates.serviceChargePercent ?? current.serviceChargePercent ?? 0,
-            100
-          ),
-          shippingFee: clampNonNegative(updates.shippingFee ?? current.shippingFee),
-          freeShippingThreshold: clampNonNegative(
-            updates.freeShippingThreshold ?? current.freeShippingThreshold
-          ),
-          updatedAt: now,
-        };
-        notifySync(syncPaymentSettingsToSupabase(merged));
+      const current =
+        state.paymentSettingsByStore[storeId] ?? createDefaultPaymentSettings(storeId);
+      const merged: PaymentSettings = {
+        ...current,
+        ...updates,
+        storeId,
+        taxPercent: clampPercent(updates.taxPercent ?? current.taxPercent, 100),
+        serviceChargePercent: clampPercent(
+          updates.serviceChargePercent ?? current.serviceChargePercent ?? 0,
+          100
+        ),
+        shippingFee: clampNonNegative(updates.shippingFee ?? current.shippingFee),
+        freeShippingThreshold: clampNonNegative(
+          updates.freeShippingThreshold ?? current.freeShippingThreshold
+        ),
+        updatedAt: now,
+      };
+
+      const res = await syncPaymentSettingsToSupabase(merged);
+      if (!res.success) {
         return {
-          ...prev,
-          paymentSettingsByStore: {
-            ...prev.paymentSettingsByStore,
-            [storeId]: merged,
-          },
+          success: false,
+          error: res.error || 'Could not save payment settings to database.',
         };
-      });
+      }
+
+      setState((prev) => ({
+        ...prev,
+        paymentSettingsByStore: {
+          ...prev.paymentSettingsByStore,
+          [storeId]: merged,
+        },
+      }));
+      return { success: true };
     },
-    [notifySync]
+    [state.paymentSettingsByStore]
   );
 
   const getStoreOrders = useCallback(
@@ -2060,6 +2133,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const newOrder: CustomerOrder = {
         ...input,
         id: `ORD-${orderNum}`,
+        dbId: generateUuid(),
         storeName: storeObj?.name ?? 'Store',
         buyerId: state.currentBuyer?.id,
         phoneNumber: input.phoneNumber.trim(),
@@ -2076,31 +2150,31 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         updatedAt: nowIso,
       };
 
-      setState((prev) => {
-        const qtyByProduct = new Map<string, number>();
-        const qtyByVariantKey = new Map<string, number>();
+      const qtyByProduct = new Map<string, number>();
+      const qtyByVariantKey = new Map<string, number>();
 
-        normalizedItems.forEach((item) => {
-          qtyByProduct.set(
-            item.productId,
-            (qtyByProduct.get(item.productId) ?? 0) + item.quantity
+      normalizedItems.forEach((item) => {
+        qtyByProduct.set(
+          item.productId,
+          (qtyByProduct.get(item.productId) ?? 0) + item.quantity
+        );
+        if (item.variantId) {
+          qtyByVariantKey.set(
+            `${item.productId}::id::${item.variantId}`,
+            (qtyByVariantKey.get(`${item.productId}::id::${item.variantId}`) ?? 0) +
+              item.quantity
           );
-          if (item.variantId) {
-            qtyByVariantKey.set(
-              `${item.productId}::id::${item.variantId}`,
-              (qtyByVariantKey.get(`${item.productId}::id::${item.variantId}`) ?? 0) +
-                item.quantity
-            );
-          } else if (item.variant) {
-            qtyByVariantKey.set(
-              `${item.productId}::label::${item.variant}`,
-              (qtyByVariantKey.get(`${item.productId}::label::${item.variant}`) ?? 0) +
-                item.quantity
-            );
-          }
-        });
+        } else if (item.variant) {
+          qtyByVariantKey.set(
+            `${item.productId}::label::${item.variant}`,
+            (qtyByVariantKey.get(`${item.productId}::label::${item.variant}`) ?? 0) +
+              item.quantity
+          );
+        }
+      });
 
-        const nextProducts = prev.products.map((product) => {
+      const applyStockDecrement = (productsList: Product[]) =>
+        productsList.map((product) => {
           const orderedQty = qtyByProduct.get(product.id);
           if (!orderedQty) return product;
           const nextStock = Math.max(0, product.stock - orderedQty);
@@ -2123,38 +2197,56 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           };
         });
 
-        return {
-          ...prev,
-          products: nextProducts,
-          placedOrders: [newOrder, ...(prev.placedOrders ?? [])],
-        };
-      });
-      notifySync(syncOrderToSupabase(newOrder));
+      const updatedProductsSnapshot = applyStockDecrement(state.products);
+
+      setState((prev) => ({
+        ...prev,
+        products: applyStockDecrement(prev.products),
+        placedOrders: [newOrder, ...(prev.placedOrders ?? [])],
+      }));
+      notifySync(syncOrderToSupabase(newOrder, updatedProductsSnapshot));
       return newOrder;
     },
-    [notifySync, state.currentBuyer, state.paymentSettingsByStore, state.stores]
+    [notifySync, state.currentBuyer, state.paymentSettingsByStore, state.products, state.stores]
   );
 
   const updateOrderStatus = useCallback(
     (orderId: string, status: OrderFulfillmentStatus) => {
       const nowIso = new Date().toISOString();
+      const targetOrder = (state.placedOrders ?? []).find(
+        (o) => o.id === orderId || o.dbId === orderId
+      );
       setState((prev) => ({
         ...prev,
         placedOrders: (prev.placedOrders ?? []).map((o) =>
-          o.id === orderId ? { ...o, status, updatedAt: nowIso } : o
+          o.id === orderId || o.dbId === orderId ? { ...o, status, updatedAt: nowIso } : o
         ),
       }));
+      notifySync(syncOrderStatusToSupabase(orderId, status, targetOrder?.dbId));
     },
-    []
+    [notifySync, state.placedOrders]
   );
 
   const updateOrderPaymentStatus = useCallback(
     (orderId: string, paymentStatus: OrderPaymentStatus, verifiedBy?: string) => {
       const nowIso = new Date().toISOString();
+      const targetOrder = (state.placedOrders ?? []).find(
+        (o) => o.id === orderId || o.dbId === orderId
+      );
+      const nextAmountPaid =
+        paymentStatus === 'paid'
+          ? targetOrder?.grandTotal ?? 0
+          : paymentStatus === 'refunded'
+            ? targetOrder?.amountPaid ?? targetOrder?.grandTotal ?? 0
+            : 0;
+      const nextPaidAt =
+        paymentStatus === 'paid' ? targetOrder?.paidAt ?? nowIso : targetOrder?.paidAt;
+      const nextVerifiedBy = verifiedBy ?? state.currentUser?.id ?? targetOrder?.verifiedBy;
+
       setState((prev) => ({
         ...prev,
         placedOrders: (prev.placedOrders ?? []).map((o) => {
-          if (o.id !== orderId) return o;
+          if (o.id !== orderId && o.dbId !== orderId) return o;
           return {
             ...o,
             paymentStatus,
@@ -2170,8 +2262,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           };
         }),
       }));
+
+      notifySync(
+        syncOrderPaymentStatusToSupabase({
+          orderCodeOrId: orderId,
+          dbId: targetOrder?.dbId,
+          paymentStatus,
+          amountPaid: nextAmountPaid,
+          paidAt: nextPaidAt,
+          verifiedBy: nextVerifiedBy,
+        })
+      );
     },
-    []
+    [notifySync, state.currentUser?.id, state.placedOrders]
   );
 
   const recordSubscriptionPayment = useCallback(
@@ -2257,43 +2360,45 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [notifySync, state.users]
   );
 
-  const adminDeleteUser = useCallback((userId: string) => {
-    setState((prev) => {
-      const removedStoreIds = new Set(
-        prev.stores.filter((s) => s.ownerId === userId).map((s) => s.id)
-      );
-      const nextStores = prev.stores.filter((s) => s.ownerId !== userId);
-      const nextProducts = prev.products.filter((p) => !removedStoreIds.has(p.storeId));
-      const nextPayments = { ...prev.paymentSettingsByStore };
-      removedStoreIds.forEach((id) => delete nextPayments[id]);
-      const nextOrders = (prev.placedOrders ?? []).filter(
-        (o) => !removedStoreIds.has(o.storeId)
-      );
-
-      return {
-        ...prev,
-        users: (prev.users ?? []).filter((u) => u.id !== userId),
-        currentUser: prev.currentUser?.id === userId ? null : prev.currentUser,
-        stores: nextStores,
-        products: nextProducts,
-        paymentSettingsByStore: nextPayments,
-        placedOrders: nextOrders,
-        activeStoreId:
-          prev.activeStoreId && removedStoreIds.has(prev.activeStoreId)
-            ? nextStores[0]?.id ?? null
-            : prev.activeStoreId,
-      };
-    });
-    if (isSupabaseConfigured) {
-      const client = getSupabaseClient();
-      if (client) {
-        client.from('users').delete().eq('id', userId).then();
+  const adminDeleteUser = useCallback(
+    async (userId: string): Promise<{ success: boolean; error?: string }> => {
+      const res = await deleteUserFromSupabase(userId);
+      if (!res.success) {
+        return { success: false, error: res.error || 'Could not delete user from database.' };
       }
-    }
-  }, []);
+      setState((prev) => {
+        const removedStoreIds = new Set(
+          prev.stores.filter((s) => s.ownerId === userId).map((s) => s.id)
+        );
+        const nextStores = prev.stores.filter((s) => s.ownerId !== userId);
+        const nextProducts = prev.products.filter((p) => !removedStoreIds.has(p.storeId));
+        const nextPayments = { ...prev.paymentSettingsByStore };
+        removedStoreIds.forEach((id) => delete nextPayments[id]);
+        const nextOrders = (prev.placedOrders ?? []).filter(
+          (o) => !removedStoreIds.has(o.storeId)
+        );
+
+        return {
+          ...prev,
+          users: (prev.users ?? []).filter((u) => u.id !== userId),
+          currentUser: prev.currentUser?.id === userId ? null : prev.currentUser,
+          stores: nextStores,
+          products: nextProducts,
+          paymentSettingsByStore: nextPayments,
+          placedOrders: nextOrders,
+          activeStoreId:
+            prev.activeStoreId && removedStoreIds.has(prev.activeStoreId)
+              ? nextStores[0]?.id ?? null
+              : prev.activeStoreId,
+        };
+      });
+      return { success: true };
+    },
+    []
+  );
 
   const adminUpdateStore = useCallback(
-    (
+    async (
       storeId: string,
       updates: {
         name?: string;
@@ -2302,7 +2407,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         restrictedReason?: string;
         templateId?: IndustryTemplateId;
       }
-    ): { success: boolean; error?: string } => {
+    ): Promise<{ success: boolean; error?: string }> => {
       const target = state.stores.find((s) => s.id === storeId);
       if (!target) {
         return { success: false, error: 'Store not found.' };
@@ -2335,15 +2440,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         updatedAt: now,
       };
 
+      const res = await syncStoreToSupabase(updatedStore);
+      if (!res.success) {
+        return { success: false, error: res.error || 'Could not update store in database.' };
+      }
+
       setState((prev) => ({
         ...prev,
         stores: prev.stores.map((s) => (s.id === storeId ? updatedStore : s)),
       }));
 
-      notifySync(syncStoreToSupabase(updatedStore));
       return { success: true };
     },
-    [notifySync, state.stores]
+    [state.stores]
   );
 
   const adminToggleSubscriptionTxStatus = useCallback(

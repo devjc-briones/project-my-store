@@ -2,6 +2,7 @@ import {
   AppNotification,
   BuyerAccount,
   CustomerOrder,
+  OrderItemSummary,
   OrderPaymentStatus,
   PaymentSettings,
   PlatformPaymentChannel,
@@ -140,13 +141,15 @@ export function toDbStoreRow(store: Store) {
 }
 
 export function toDbProductRow(product: Product) {
+  const cleanSku =
+    product.sku.trim() || `PRD-${generateUuid().replace(/-/g, '').slice(0, 6).toUpperCase()}`;
   return {
     id: isUuid(product.id) ? product.id : generateUuid(),
     store_id: isUuid(product.storeId) ? product.storeId : generateUuid(),
     name: product.name.trim(),
     description: product.description ?? '',
     category: product.category.trim() || 'General',
-    sku: product.sku.trim(),
+    sku: cleanSku,
     base_price: clampNonNegative(product.basePrice),
     discount_type: product.discountType ?? 'none',
     discount_value: clampNonNegative(product.discountValue),
@@ -207,7 +210,7 @@ export function toDbStorePaymentMethodRows(settings: PaymentSettings) {
       updated_at: settings.updatedAt,
     },
     {
-      store_id: settings.storeId,
+      store_id: safeStoreId,
       method_key: 'maya' as const,
       is_enabled: Boolean(settings.mayaEnabled),
       bank_name: null,
@@ -218,7 +221,7 @@ export function toDbStorePaymentMethodRows(settings: PaymentSettings) {
       updated_at: settings.updatedAt,
     },
     {
-      store_id: settings.storeId,
+      store_id: safeStoreId,
       method_key: 'bank' as const,
       is_enabled: Boolean(settings.bankTransferEnabled),
       bank_name: settings.bankDetails.bankName.trim() || null,
@@ -229,7 +232,7 @@ export function toDbStorePaymentMethodRows(settings: PaymentSettings) {
       updated_at: settings.updatedAt,
     },
     {
-      store_id: settings.storeId,
+      store_id: safeStoreId,
       method_key: 'cod' as const,
       is_enabled: Boolean(settings.codEnabled),
       bank_name: null,
@@ -262,12 +265,73 @@ export function toDbPlaceOrderRpcPayload(order: CustomerOrder) {
   };
 }
 
-export function toDbStoreProductPaymentRow(order: CustomerOrder) {
+export function toDbOrderRow(order: CustomerOrder, resolvedOrderUuid?: string) {
+  const safeOrderId =
+    resolvedOrderUuid && isUuid(resolvedOrderUuid)
+      ? resolvedOrderUuid
+      : isUuid(order.dbId)
+        ? order.dbId!
+        : isUuid(order.id)
+          ? order.id
+          : generateUuid();
+
+  return {
+    id: safeOrderId,
+    order_code: order.id,
+    store_id: isUuid(order.storeId) ? order.storeId : generateUuid(),
+    user_id: isUuid(order.buyerId) ? order.buyerId : null,
+    customer_name: order.customerName.trim(),
+    phone_number: order.phoneNumber.trim(),
+    delivery_address: order.deliveryAddress.trim(),
+    notes: order.notes?.trim() || null,
+    currency: order.currency ?? 'PHP',
+    subtotal: clampNonNegative(order.subtotal),
+    delivery_fee: clampNonNegative(order.deliveryFee),
+    tax_amount: clampNonNegative(order.taxAmount),
+    service_charge_amount: clampNonNegative(order.serviceChargeAmount),
+    grand_total: clampNonNegative(order.grandTotal),
+    status: order.status,
+    created_at: order.createdAt,
+    updated_at: order.updatedAt ?? order.createdAt,
+  };
+}
+
+export function toDbOrderItemRows(orderUuid: string, items: OrderItemSummary[]) {
+  return items.map((item) => {
+    const qty = Math.max(1, Math.floor(item.quantity));
+    const unitPrice = clampNonNegative(item.unitPrice);
+    return {
+      id: generateUuid(),
+      order_id: orderUuid,
+      store_product_id: isUuid(item.productId) ? item.productId : null,
+      variant_id: isUuid(item.variantId) ? item.variantId : null,
+      product_name: item.name.trim(),
+      variant_label: item.variant?.trim() || null,
+      quantity: qty,
+      unit_price: unitPrice,
+      line_total:
+        item.lineTotal !== undefined
+          ? clampNonNegative(item.lineTotal)
+          : Math.round(unitPrice * qty * 100) / 100,
+    };
+  });
+}
+
+export function toDbStoreProductPaymentRow(order: CustomerOrder, resolvedOrderUuid?: string) {
   const methodKey = derivePaymentMethodKey(order.paymentMethodKey, order.paymentMethod);
   const paymentStatus = deriveOrderPaymentStatus(methodKey, order.paymentStatus);
   const firstItem = order.items[0];
+  const safeOrderId =
+    resolvedOrderUuid && isUuid(resolvedOrderUuid)
+      ? resolvedOrderUuid
+      : isUuid(order.dbId)
+        ? order.dbId!
+        : isUuid(order.id)
+          ? order.id
+          : generateUuid();
   return {
-    order_id: isUuid(order.id) ? order.id : generateUuid(),
+    id: generateUuid(),
+    order_id: safeOrderId,
     store_id: isUuid(order.storeId) ? order.storeId : generateUuid(),
     user_id: isUuid(order.buyerId) ? order.buyerId : null,
     store_product_id: isUuid(firstItem?.productId) ? firstItem.productId : null,

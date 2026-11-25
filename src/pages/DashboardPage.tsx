@@ -42,11 +42,19 @@ export function DashboardPage() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [storeToDelete, storeLimitModalOpen]);
 
-  const handleConfirmDeleteStore = () => {
+  const handleConfirmDeleteStore = async () => {
     if (!storeToDelete) return;
     const deletedName = storeToDelete.name;
-    deleteStore(storeToDelete.id);
+    const res = await deleteStore(storeToDelete.id);
     setStoreToDelete(null);
+    if (!res.success) {
+      pushToast({
+        type: 'error',
+        title: 'Could not delete store',
+        description: res.error || 'Failed to delete store from database.',
+      });
+      return;
+    }
     pushToast({
       type: 'success',
       title: 'Store deleted',
