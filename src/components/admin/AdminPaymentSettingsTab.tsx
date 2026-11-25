@@ -4,8 +4,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
-  Eye,
-  EyeOff,
   Landmark,
   Plus,
   QrCode,
@@ -439,24 +437,18 @@ export function AdminPaymentSettingsTab({
                       type="button"
                       role="switch"
                       aria-checked={channel.enabled}
+                      aria-label={`Toggle ${channel.label}`}
                       onClick={() => handleToggleChannel(channel)}
-                      className={`inline-flex items-center gap-1.5 min-h-[34px] px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap cursor-pointer ${
-                        channel.enabled
-                          ? 'bg-[#0f172a] text-white'
-                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-slate-900 focus:ring-offset-2 ${
+                        channel.enabled ? 'bg-[#0f172a]' : 'bg-slate-200 hover:bg-slate-300'
                       }`}
                     >
-                      {channel.enabled ? (
-                        <>
-                          <Eye className="w-3.5 h-3.5" />
-                          <span>Available</span>
-                        </>
-                      ) : (
-                        <>
-                          <EyeOff className="w-3.5 h-3.5" />
-                          <span>Hidden</span>
-                        </>
-                      )}
+                      <span
+                        aria-hidden="true"
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                          channel.enabled ? 'translate-x-5' : 'translate-x-0'
+                        }`}
+                      />
                     </button>
 
                     <button

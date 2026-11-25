@@ -239,6 +239,36 @@ function NumericRuleInput({ id, value, max, onChangeValue }: NumericRuleInputPro
   );
 }
 
+function ToggleSwitch({
+  checked,
+  onToggle,
+  label,
+}: {
+  checked: boolean;
+  onToggle: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={onToggle}
+      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-slate-900 focus:ring-offset-2 ${
+        checked ? 'bg-slate-900' : 'bg-slate-200 hover:bg-slate-300'
+      }`}
+    >
+      <span
+        aria-hidden="true"
+        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+          checked ? 'translate-x-5' : 'translate-x-0'
+        }`}
+      />
+    </button>
+  );
+}
+
 export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabProps) {
   const { pushToast } = useStore();
   const [qrWarningMethod, setQrWarningMethod] = useState<OnlineQrMethod | null>(null);
@@ -319,19 +349,11 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
                   <p className="text-xs text-slate-500">Instant mobile wallet transfer</p>
                 </div>
               </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.gcashEnabled}
-                onClick={handleToggleGcash}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
-                  settings.gcashEnabled
-                    ? 'bg-slate-900 text-white'
-                    : 'bg-slate-100 text-slate-600'
-                }`}
-              >
-                {settings.gcashEnabled ? 'Enabled' : 'Disabled'}
-              </button>
+              <ToggleSwitch
+                checked={settings.gcashEnabled}
+                onToggle={handleToggleGcash}
+                label="Toggle GCash E-Wallet"
+              />
             </div>
 
             <QrCodeUploader
@@ -433,19 +455,11 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
                   <p className="text-xs text-slate-500">Secondary QR / wallet transfer</p>
                 </div>
               </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.mayaEnabled}
-                onClick={handleToggleMaya}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
-                  settings.mayaEnabled
-                    ? 'bg-slate-900 text-white'
-                    : 'bg-slate-100 text-slate-600'
-                }`}
-              >
-                {settings.mayaEnabled ? 'Enabled' : 'Disabled'}
-              </button>
+              <ToggleSwitch
+                checked={settings.mayaEnabled}
+                onToggle={handleToggleMaya}
+                label="Toggle Maya E-Wallet"
+              />
             </div>
 
             <QrCodeUploader
@@ -531,19 +545,11 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
                   <p className="text-xs text-slate-500">InstaPay / PESONet bank deposit</p>
                 </div>
               </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.bankTransferEnabled}
-                onClick={handleToggleBank}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
-                  settings.bankTransferEnabled
-                    ? 'bg-slate-900 text-white'
-                    : 'bg-slate-100 text-slate-600'
-                }`}
-              >
-                {settings.bankTransferEnabled ? 'Enabled' : 'Disabled'}
-              </button>
+              <ToggleSwitch
+                checked={settings.bankTransferEnabled}
+                onToggle={handleToggleBank}
+                label="Toggle Bank Transfer"
+              />
             </div>
 
             <QrCodeUploader
@@ -641,19 +647,11 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
                   <p className="text-xs text-slate-500">Pay cash to courier upon delivery</p>
                 </div>
               </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.codEnabled}
-                onClick={() => onChange({ codEnabled: !settings.codEnabled })}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
-                  settings.codEnabled
-                    ? 'bg-slate-900 text-white'
-                    : 'bg-slate-100 text-slate-600'
-                }`}
-              >
-                {settings.codEnabled ? 'Enabled' : 'Disabled'}
-              </button>
+              <ToggleSwitch
+                checked={settings.codEnabled}
+                onToggle={() => onChange({ codEnabled: !settings.codEnabled })}
+                label="Toggle Cash on Delivery (COD)"
+              />
             </div>
 
             {settings.codEnabled && (
