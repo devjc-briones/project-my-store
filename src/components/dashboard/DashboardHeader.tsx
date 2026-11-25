@@ -611,7 +611,7 @@ export function DashboardHeader({ sectionLabel }: DashboardHeaderProps) {
                     >
                       <span className="flex items-center gap-2.5">
                         <Sparkles className="w-4 h-4 text-slate-600" />
-                        <span>Upgrade Plan</span>
+                        <span>My Plan</span>
                       </span>
                       <span className="px-2 py-0.5 text-[11px] font-semibold rounded-md bg-slate-100 text-slate-700">
                         {planLabel}
