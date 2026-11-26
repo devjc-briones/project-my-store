@@ -1,18 +1,25 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Activity,
   AlertCircle,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Copy,
   Landmark,
   Plus,
   QrCode,
+  RefreshCw,
   RotateCcw,
   Save,
+  Send,
+  ShieldCheck,
   Smartphone,
   Trash2,
   Upload,
+  Webhook,
   X,
+  Zap,
 } from 'lucide-react';
 import { AdminModalWrapper } from './AdminModalWrapper';
 import { useStore } from '../../context/StoreContext';
@@ -22,6 +29,15 @@ import {
   PlatformPaymentChannelType,
   PlatformPaymentSettings,
 } from '../../types/schema';
+import {
+  AdminGatewayActivity,
+  fetchAdminGatewayActivity,
+  fetchPaymentGatewayConfig,
+  PaymentGatewayEngine,
+  PaymentGatewayPublicConfig,
+  sendAdminTestWebhookAlert,
+  setAdminGatewayEngine,
+} from '../../utils/paymentGateway';
 import { readImageFileAsDataUrl } from '../../utils/paymentQr';
 
 interface AdminPaymentSettingsTabProps {
@@ -113,8 +129,154 @@ export function AdminPaymentSettingsTab({
   const [newAccountNumber, setNewAccountNumber] = useState('');
   const [newNote, setNewNote] = useState('');
   const [newQrUrl, setNewQrUrl] = useState<string | undefined>(undefined);
-  const [newRequiresReceipt, setNewRequiresReceipt] = useState(true);
+  const [newRequiresReceipt, setNewRequiresReceipt] = useState(false);
   const newQrInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Zero-Receipt Gateway Engine & Live Webhook Simulator state
+  const [gatewayConfig, setGatewayConfig] = useState<PaymentGatewayPublicConfig | null>(null);
+  const [gatewayActivity, setGatewayActivity] = useState<AdminGatewayActivity | null>(null);
+  const [gatewayLoading, setGatewayLoading] = useState(false);
+  const [switchingEngine, setSwitchingEngine] = useState(false);
+  const [gatewayExpanded, setGatewayExpanded] = useState(true);
+  const [simChannel, setSimChannel] = useState<'gcash' | 'maya' | 'bank'>('gcash');
+  const [simText, setSimText] = useState(
+    'You have received PHP 369.01 of GCash from JUAN DELA CRUZ with Ref. No. 901234567890.'
+  );
+  const [simSending, setSimSending] = useState(false);
+
+  const loadGatewayState = useCallback(async () => {
+    setGatewayLoading(true);
+    try {
+      const [cfg, act] = await Promise.all([
+        fetchPaymentGatewayConfig(),
+        fetchAdminGatewayActivity().catch(() => null),
+      ]);
+      setGatewayConfig(cfg);
+      if (act) setGatewayActivity(act);
+    } catch {
+      // Gateway server may not be reachable in static-only preview
+    } finally {
+      setGatewayLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadGatewayState();
+  }, [loadGatewayState]);
+
+  const handleEngineSwitch = async (nextEngine: PaymentGatewayEngine) => {
+    if (switchingEngine || gatewayConfig?.engine === nextEngine) return;
+    setSwitchingEngine(true);
+    try {
+      const result = await setAdminGatewayEngine(nextEngine);
+      setGatewayConfig(result.config);
+      pushToast({
+        type: 'success',
+        title:
+          nextEngine === 'auto_match'
+            ? 'Auto-Match QR Ph Active'
+            : 'PayMongo Checkout API Active',
+        description:
+          nextEngine === 'auto_match'
+            ? 'Checkout now uses Zero-BIR / Zero-DTI exact-centavo QR matching.'
+            : 'Checkout will create PayMongo Checkout sessions when PAYMONGO_SECRET_KEY is configured.',
+      });
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'Engine Switch Failed',
+        description:
+          err instanceof Error ? err.message : 'Unable to switch payment gateway engine.',
+      });
+    } finally {
+      setSwitchingEngine(false);
+    }
+  };
+
+  const handleCopyText = async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      pushToast({
+        type: 'success',
+        title: `${label} copied`,
+        description: 'Ready to paste into your forwarder or webhook settings.',
+      });
+    } catch {
+      pushToast({
+        type: 'error',
+        title: 'Copy Failed',
+        description: 'Unable to copy to clipboard.',
+      });
+    }
+  };
+
+  const handleFillExactAmount = (amount: number, channel: string) => {
+    const normalized = channel.toLowerCase().includes('maya')
+      ? 'maya'
+      : channel.toLowerCase().includes('bank')
+        ? 'bank'
+        : 'gcash';
+    setSimChannel(normalized);
+    const formatted = amount.toFixed(2);
+    const ref = `TEST${Date.now().toString().slice(-6)}`;
+    if (normalized === 'maya') {
+      setSimText(
+        `You received PHP ${formatted} via Maya from MARIA SANTOS. Ref No: ${ref}`
+      );
+    } else if (normalized === 'bank') {
+      setSimText(
+        `InstaPay credit of PHP ${formatted} received in your account. Reference: ${ref}`
+      );
+    } else {
+      setSimText(
+        `You have received PHP ${formatted} of GCash from JUAN DELA CRUZ with Ref. No. ${ref}.`
+      );
+    }
+  };
+
+  const handleSimulateWebhook = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!simText.trim() || simSending) return;
+    setSimSending(true);
+    try {
+      const res = await sendAdminTestWebhookAlert({
+        text: simText.trim(),
+        channel: simChannel,
+      });
+      await loadGatewayState();
+      if (res.matched && res.session) {
+        pushToast({
+          type: 'success',
+          title: 'Payment Auto-Matched!',
+          description: `Session ${res.session.referenceCode} (₱${res.session.uniquePayableAmount.toFixed(
+            2
+          )}) marked PAID without receipt upload.`,
+        });
+      } else if (res.duplicate) {
+        pushToast({
+          type: 'info',
+          title: 'Duplicate Alert Ignored',
+          description: 'Idempotency guard prevented duplicate processing.',
+        });
+      } else {
+        pushToast({
+          type: 'info',
+          title: 'Alert Recorded (No Open Match)',
+          description: `Parsed ₱${Number(res.amount ?? 0).toFixed(
+            2
+          )}, but no awaiting session had that exact centavo total.`,
+        });
+      }
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'Simulation Failed',
+        description: err instanceof Error ? err.message : 'Unable to send simulated alert.',
+      });
+    } finally {
+      setSimSending(false);
+    }
+  };
 
   const updateChannel = (
     channelId: string,
@@ -323,6 +485,293 @@ export function AdminPaymentSettingsTab({
             <span>Save Settings</span>
           </button>
         </div>
+      </div>
+
+      {/* Zero-Receipt Local Payment Gateway Control Panel */}
+      <div className="bg-white border border-[#e2e8f0] rounded-2xl overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+        <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50/70 border-b border-slate-100">
+          <div className="flex items-start gap-3">
+            <div className="w-9 h-9 rounded-xl bg-[#0f172a] text-white flex items-center justify-center shrink-0">
+              <Zap className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-sm font-bold text-[#0f172a]">
+                  Zero-Receipt Local Payment Gateway
+                </h2>
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  <ShieldCheck className="w-3 h-3" />
+                  No BIR / No DTI Required
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Auto-matches GCash, Maya, and PH Bank transfers via unique centavo amounts and
+                webhook alerts—customers never upload receipts.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => void loadGatewayState()}
+              disabled={gatewayLoading}
+              className="inline-flex items-center gap-1.5 min-h-[34px] px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-[#e2e8f0] rounded-xl cursor-pointer disabled:opacity-60"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${gatewayLoading ? 'animate-spin' : ''}`} />
+              <span>Refresh</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setGatewayExpanded((prev) => !prev)}
+              aria-label={gatewayExpanded ? 'Collapse gateway settings' : 'Expand gateway settings'}
+              className="w-8 h-8 rounded-lg border border-[#e2e8f0] bg-white text-slate-500 hover:text-slate-900 flex items-center justify-center cursor-pointer"
+            >
+              {gatewayExpanded ? (
+                <ChevronUp className="w-4 h-4" />
+              ) : (
+                <ChevronDown className="w-4 h-4" />
+              )}
+            </button>
+          </div>
+        </div>
+
+        {gatewayExpanded && (
+          <div className="p-4 sm:p-5 space-y-4">
+            {/* Engine Mode Selector + Server Readiness */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+              <div className="lg:col-span-7 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  disabled={switchingEngine}
+                  onClick={() => void handleEngineSwitch('auto_match')}
+                  className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+                    (gatewayConfig?.engine ?? 'auto_match') === 'auto_match'
+                      ? 'border-slate-900 bg-slate-50 ring-2 ring-slate-900/10'
+                      : 'border-slate-200 bg-white hover:border-slate-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-slate-900">
+                      Auto-Match QR Ph + Alert Webhook
+                    </span>
+                    {(gatewayConfig?.engine ?? 'auto_match') === 'auto_match' && (
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-900 text-white">
+                        Active
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                    Permanent Zero-BIR / Zero-DTI mode. Assigns unique centavo amounts (e.g.
+                    ₱369.07) to personal GCash, Maya &amp; PH Bank accounts and auto-confirms via
+                    SMS/email alert webhook.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={switchingEngine}
+                  onClick={() => void handleEngineSwitch('paymongo')}
+                  className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+                    gatewayConfig?.engine === 'paymongo'
+                      ? 'border-slate-900 bg-slate-50 ring-2 ring-slate-900/10'
+                      : 'border-slate-200 bg-white hover:border-slate-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-slate-900">
+                      PayMongo Checkout API
+                    </span>
+                    {gatewayConfig?.engine === 'paymongo' && (
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-900 text-white">
+                        Active
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                    Hosted GCash, Maya &amp; QR Ph checkout via PayMongo Sandbox or Individual
+                    account. Falls back cleanly to Auto-Match if{' '}
+                    <code className="font-mono text-[10px]">PAYMONGO_SECRET_KEY</code> is unset.
+                  </p>
+                </button>
+              </div>
+
+              <div className="lg:col-span-5 bg-slate-50 border border-slate-200/80 rounded-xl p-3.5 flex flex-col justify-between gap-2.5">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                  Server Readiness
+                </p>
+                <div className="space-y-2 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-600">Local Webhook Secret</span>
+                    <span
+                      className={`font-semibold ${
+                        gatewayConfig?.localWebhookConfigured
+                          ? 'text-emerald-700'
+                          : 'text-amber-700'
+                      }`}
+                    >
+                      {gatewayConfig?.localWebhookConfigured ? 'Configured' : 'Set in .env'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-600">PayMongo API Key</span>
+                    <span
+                      className={`font-semibold ${
+                        gatewayConfig?.paymongoConfigured ? 'text-emerald-700' : 'text-slate-500'
+                      }`}
+                    >
+                      {gatewayConfig?.paymongoConfigured ? 'Configured' : 'Optional / Unset'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-600">Supabase Service Sync</span>
+                    <span
+                      className={`font-semibold ${
+                        gatewayConfig?.supabaseServiceConfigured
+                          ? 'text-emerald-700'
+                          : 'text-amber-700'
+                      }`}
+                    >
+                      {gatewayConfig?.supabaseServiceConfigured
+                        ? 'Connected'
+                        : 'Memory Fallback'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Webhook Forwarder Endpoint & Live Simulator */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+              <div className="lg:col-span-6 bg-slate-50 border border-slate-200/80 rounded-xl p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-slate-900">
+                    <Webhook className="w-3.5 h-3.5" />
+                    <span>Android SMS / Email Alert Webhook</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void handleCopyText(
+                        gatewayConfig?.localWebhookUrl ||
+                          `${window.location.origin}/api/payments/local-webhook`,
+                        'Webhook URL'
+                      )
+                    }
+                    className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold bg-white border border-slate-200 hover:bg-slate-100 rounded-lg cursor-pointer"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>Copy URL</span>
+                  </button>
+                </div>
+
+                <p className="text-[11px] font-mono text-slate-700 bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 break-all">
+                  POST{' '}
+                  {gatewayConfig?.localWebhookUrl ||
+                    `${window.location.origin}/api/payments/local-webhook`}
+                </p>
+
+                <div className="text-[11px] text-slate-600 space-y-1">
+                  <p>
+                    Forward GCash, Maya, or Bank credit SMS/emails with header{' '}
+                    <code className="font-mono bg-white px-1 py-0.5 rounded border border-slate-200">
+                      Authorization: Bearer &lt;LOCAL_PAYMENT_WEBHOOK_SECRET&gt;
+                    </code>{' '}
+                    and JSON body:
+                  </p>
+                  <pre className="font-mono text-[10px] bg-white border border-slate-200 rounded-lg p-2 text-slate-800 overflow-x-auto">
+                    {`{ "text": "{{sms_body}}" }`}
+                  </pre>
+                </div>
+              </div>
+
+              {/* Admin Live Webhook Simulator */}
+              <div className="lg:col-span-6 bg-slate-50 border border-slate-200/80 rounded-xl p-3.5 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-slate-900">
+                    <Activity className="w-3.5 h-3.5" />
+                    <span>Live Webhook Simulator</span>
+                  </div>
+                  <span className="text-[11px] text-slate-500 tabular-nums">
+                    {(gatewayActivity?.intents ?? []).filter((i) => i.status === 'awaiting_payment')
+                      .length}{' '}
+                    awaiting
+                  </span>
+                </div>
+
+                {gatewayActivity &&
+                  gatewayActivity.intents.some((i) => i.status === 'awaiting_payment') && (
+                    <div className="space-y-1.5 max-h-28 overflow-y-auto pr-1">
+                      {gatewayActivity.intents
+                        .filter((i) => i.status === 'awaiting_payment')
+                        .slice(0, 4)
+                        .map((intent) => (
+                          <div
+                            key={intent.id}
+                            className="flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-[11px]"
+                          >
+                            <div className="min-w-0">
+                              <span className="font-mono font-bold text-slate-900">
+                                ₱{intent.uniquePayableAmount.toFixed(2)}
+                              </span>
+                              <span className="text-slate-500 ml-2 truncate">
+                                {intent.channelLabel} · {intent.referenceCode}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleFillExactAmount(
+                                  intent.uniquePayableAmount,
+                                  intent.channel
+                                )
+                              }
+                              className="px-2 py-1 text-[10px] font-semibold bg-slate-900 text-white rounded hover:bg-slate-800 shrink-0 cursor-pointer"
+                            >
+                              Fill Exact ₱
+                            </button>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+
+                <form onSubmit={handleSimulateWebhook} className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={simChannel}
+                      onChange={(e) =>
+                        setSimChannel(e.target.value as 'gcash' | 'maya' | 'bank')
+                      }
+                      aria-label="Simulated payment channel"
+                      className="min-h-[34px] px-2.5 py-1 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
+                    >
+                      <option value="gcash">GCash SMS</option>
+                      <option value="maya">Maya Alert</option>
+                      <option value="bank">Bank InstaPay</option>
+                    </select>
+                    <input
+                      type="text"
+                      value={simText}
+                      onChange={(e) => setSimText(e.target.value)}
+                      placeholder="Paste sample credit SMS text..."
+                      className="flex-1 min-h-[34px] px-2.5 py-1 text-xs font-mono bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={simSending || !simText.trim()}
+                    className="w-full inline-flex items-center justify-center gap-1.5 min-h-[36px] px-3 py-1.5 text-xs font-semibold text-white bg-[#0f172a] hover:bg-slate-800 disabled:opacity-60 rounded-lg cursor-pointer"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>
+                      {simSending ? 'Simulating Alert...' : 'Simulate Deposit Alert'}
+                    </span>
+                  </button>
+                </form>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {enabledChannels.length === 0 && (
@@ -572,7 +1021,7 @@ export function AdminPaymentSettingsTab({
                         onChange={(e) =>
                           updateChannel(channel.id, { note: e.target.value })
                         }
-                        placeholder="Scan the QR code or send exact amount, then upload your receipt."
+                        placeholder="Scan the QR code and send the exact centavo amount shown for instant auto-match."
                         className="w-full min-h-[38px] px-3 py-1.5 text-xs bg-slate-50 focus:bg-white border border-[#e2e8f0] rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
                       />
                     </div>
@@ -588,7 +1037,9 @@ export function AdminPaymentSettingsTab({
                         }
                         className="w-4 h-4 rounded border-slate-300 text-slate-900 focus:ring-slate-900"
                       />
-                      <span>Require seller to upload proof of payment receipt</span>
+                      <span>
+                        Legacy receipt upload flag (keep unchecked for Zero-Receipt Auto-Match mode)
+                      </span>
                     </label>
                   </div>
                 )}
@@ -743,7 +1194,7 @@ export function AdminPaymentSettingsTab({
                   onChange={(e) => {
                     const nextType = e.target.value as PlatformPaymentChannelType;
                     setNewType(nextType);
-                    setNewRequiresReceipt(true);
+                    setNewRequiresReceipt(false);
                   }}
                   className="w-full min-h-[38px] px-3 py-1.5 text-xs bg-slate-50 border border-[#e2e8f0] rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
                 >
@@ -873,7 +1324,7 @@ export function AdminPaymentSettingsTab({
                 type="text"
                 value={newNote}
                 onChange={(e) => setNewNote(e.target.value)}
-                placeholder="Scan QR or send exact amount, then upload your receipt."
+                placeholder="Scan QR and send the exact centavo amount shown for automatic confirmation."
                 className="w-full min-h-[38px] px-3 py-1.5 text-xs bg-slate-50 focus:bg-white border border-[#e2e8f0] rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
               />
             </div>

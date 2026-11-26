@@ -344,7 +344,7 @@ create table if not exists public.platform_payment_channels (
   label text not null,
   subtitle text not null default '',
   is_enabled boolean not null default true,
-  requires_receipt boolean not null default true,
+  requires_receipt boolean not null default false,
   account_name text not null,
   number_label text not null default 'Account Number',
   account_number text not null,
@@ -988,10 +988,6 @@ begin
     raise exception 'Selected payment method (%) is not enabled for this store.', p_method_key;
   end if;
 
-  if p_method_key <> 'cod' and char_length(trim(coalesce(p_payment_proof_url, ''))) = 0 then
-    raise exception 'Payment proof screenshot is required for online payment.';
-  end if;
-
   select * into v_checkout from public.store_checkout_settings where store_id = p_store_id;
 
   -- Compute authoritative subtotal first
@@ -1575,3 +1571,101 @@ create policy "private_read_payment_proofs" on storage.objects
       )
     )
   );
+
+-- ============================================================================
+-- 11. ZERO-RECEIPT LOCAL PAYMENT GATEWAY (AUTO-MATCH + PAYMONGO ADAPTER)
+-- ============================================================================
+create table if not exists public.platform_gateway_config (
+  id text primary key default 'default',
+  active_engine text not null default 'auto_match' check (active_engine in ('auto_match', 'paymongo')),
+  updated_by uuid references public.users(id) on delete set null,
+  updated_at timestamptz not null default now()
+);
+
+insert into public.platform_gateway_config (id, active_engine)
+values ('default', 'auto_match')
+on conflict (id) do nothing;
+
+create table if not exists public.payment_intents (
+  id uuid primary key default gen_random_uuid(),
+  reference_code text not null unique,
+  target_type text not null check (target_type in ('subscription', 'store_order')),
+  user_id uuid references public.users(id) on delete set null,
+  store_id uuid references public.stores(id) on delete cascade,
+  order_id uuid references public.buyer_orders(id) on delete set null,
+  subscription_id uuid references public.subscriptions(id) on delete set null,
+  plan_id text check (plan_id is null or plan_id in ('starter', 'pro')),
+  channel text not null,
+  provider text not null default 'auto_match' check (provider in ('auto_match', 'paymongo')),
+  currency text not null default 'PHP',
+  base_amount numeric(12, 2) not null check (base_amount > 0),
+  unique_payable_amount numeric(12, 2) not null check (unique_payable_amount > 0),
+  external_session_id text,
+  checkout_url text,
+  status text not null default 'awaiting_payment' check (
+    status in ('awaiting_payment', 'paid', 'expired', 'failed')
+  ),
+  matched_alert_reference text,
+  paid_at timestamptz,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_payment_intents_active_amount
+  on public.payment_intents(status, unique_payable_amount, expires_at);
+
+create index if not exists idx_payment_intents_external_session
+  on public.payment_intents(external_session_id)
+  where external_session_id is not null;
+
+create table if not exists public.incoming_payment_alerts (
+  id uuid primary key default gen_random_uuid(),
+  idempotency_key text not null unique,
+  provider text not null,
+  channel text,
+  amount numeric(12, 2) not null check (amount > 0),
+  sender_name text,
+  external_reference text,
+  raw_payload text,
+  matched_intent_id uuid references public.payment_intents(id) on delete set null,
+  received_at timestamptz not null default now()
+);
+
+drop trigger if exists trg_payment_intents_updated_at on public.payment_intents;
+create trigger trg_payment_intents_updated_at
+  before update on public.payment_intents
+  for each row execute function public.set_updated_at();
+
+alter table public.platform_gateway_config enable row level security;
+alter table public.payment_intents enable row level security;
+alter table public.incoming_payment_alerts enable row level security;
+
+drop policy if exists "platform_gateway_config_select" on public.platform_gateway_config;
+create policy "platform_gateway_config_select" on public.platform_gateway_config
+  for select using (true);
+
+drop policy if exists "platform_gateway_config_admin_write" on public.platform_gateway_config;
+create policy "platform_gateway_config_admin_write" on public.platform_gateway_config
+  for all using (public.current_user_role_id() = 1)
+  with check (public.current_user_role_id() = 1);
+
+drop policy if exists "payment_intents_select_owner_or_admin" on public.payment_intents;
+create policy "payment_intents_select_owner_or_admin" on public.payment_intents
+  for select using (
+    user_id = auth.uid()
+    or public.current_user_role_id() = 1
+    or exists (select 1 from public.stores s where s.id = store_id and s.user_id = auth.uid())
+  );
+
+drop policy if exists "payment_intents_insert_auth_or_store" on public.payment_intents;
+create policy "payment_intents_insert_auth_or_store" on public.payment_intents
+  for insert with check (
+    (user_id is null or user_id = auth.uid())
+    and status = 'awaiting_payment'
+  );
+
+drop policy if exists "incoming_payment_alerts_admin_only" on public.incoming_payment_alerts;
+create policy "incoming_payment_alerts_admin_only" on public.incoming_payment_alerts
+  for select using (public.current_user_role_id() = 1);
+

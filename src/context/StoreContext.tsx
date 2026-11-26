@@ -190,7 +190,13 @@ interface StoreContextValue {
     status?: SubscriptionTransaction['status'];
     dueDate?: string;
     proofUrl?: string;
-  }) => Promise<{ success: boolean; error?: string }>;
+  }) => Promise<{ success: boolean; tx?: SubscriptionTransaction; error?: string }>;
+  confirmGatewaySubscription: (input: {
+    referenceId: string;
+    planId: 'pro';
+    amount: number;
+    paymentMethod: string;
+  }) => Promise<void>;
   adminUpdateUser: (
     userId: string,
     updates: Partial<
@@ -2304,6 +2310,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         paymentMethodKey: methodKey,
         paymentStatus: initialPaymentStatus,
         amountPaid: initialPaymentStatus === 'paid' ? input.grandTotal : 0,
+        paidAt: initialPaymentStatus === 'paid' ? nowIso : input.paidAt,
         paymentReferenceNumber: input.paymentReferenceNumber?.trim() || undefined,
         items: normalizedItems,
         status: 'Pending',
@@ -2450,7 +2457,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       status?: SubscriptionTransaction['status'];
       dueDate?: string;
       proofUrl?: string;
-    }): Promise<{ success: boolean; error?: string }> => {
+    }): Promise<{ success: boolean; tx?: SubscriptionTransaction; error?: string }> => {
       const nextStatus = input.status ?? 'paid';
       const nowIso = new Date().toISOString();
       const nextPeriodEndIso = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
@@ -2485,9 +2492,87 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         ...prev,
         subscriptionTransactions: [tx, ...(prev.subscriptionTransactions ?? [])],
       }));
-      return { success: true };
+      return { success: true, tx };
     },
     [pushToast]
+  );
+
+  const confirmGatewaySubscription = useCallback(
+    async (input: {
+      referenceId: string;
+      planId: 'pro';
+      amount: number;
+      paymentMethod: string;
+    }) => {
+      const nowIso = new Date().toISOString();
+      const nextPeriodEndIso = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+      await hydrateSessionRef.current?.();
+
+      setState((prev) => {
+        if (!prev.currentUser) return prev;
+        const updatedUser: User = {
+          ...prev.currentUser,
+          plan: input.planId,
+          planPeriodEndsAt: nextPeriodEndIso,
+          cancelAtPeriodEnd: false,
+          status:
+            prev.currentUser.status === 'restricted' &&
+            prev.currentUser.restrictedReason?.includes('Subscription billing')
+              ? 'active'
+              : prev.currentUser.status,
+          restrictedReason:
+            prev.currentUser.status === 'restricted' &&
+            prev.currentUser.restrictedReason?.includes('Subscription billing')
+              ? undefined
+              : prev.currentUser.restrictedReason,
+          updatedAt: nowIso,
+        };
+
+        const existingTxs = prev.subscriptionTransactions ?? [];
+        const hasRef = existingTxs.some((t) => t.referenceId === input.referenceId);
+        const nextTxs: SubscriptionTransaction[] = hasRef
+          ? existingTxs.map((t) =>
+              t.referenceId === input.referenceId
+                ? {
+                    ...t,
+                    status: 'paid',
+                    periodStart: t.periodStart ?? nowIso,
+                    periodEnd: nextPeriodEndIso,
+                    approvedAt: nowIso,
+                    updatedAt: nowIso,
+                  }
+                : t
+            )
+          : [
+              {
+                id: generateUuid(),
+                referenceId: input.referenceId,
+                userId: prev.currentUser.id,
+                userName: prev.currentUser.name,
+                userEmail: prev.currentUser.email,
+                planId: input.planId,
+                amount: clampNonNegative(input.amount),
+                paymentMethod: input.paymentMethod,
+                status: 'paid',
+                periodStart: nowIso,
+                periodEnd: nextPeriodEndIso,
+                approvedAt: nowIso,
+                createdAt: nowIso,
+                updatedAt: nowIso,
+              },
+              ...existingTxs,
+            ];
+
+        return {
+          ...prev,
+          currentUser: updatedUser,
+          users: (prev.users ?? []).map((u) => (u.id === updatedUser.id ? updatedUser : u)),
+          subscriptionTransactions: nextTxs,
+        };
+      });
+    },
+    []
   );
 
   const adminUpdateUser = useCallback(
@@ -2835,6 +2920,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       updateOrderStatus,
       updateOrderPaymentStatus,
       recordSubscriptionPayment,
+      confirmGatewaySubscription,
       adminUpdateUser,
       adminDeleteUser,
       adminUpdateStore,
@@ -2884,6 +2970,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       updateOrderStatus,
       updateOrderPaymentStatus,
       recordSubscriptionPayment,
+      confirmGatewaySubscription,
       adminUpdateUser,
       adminDeleteUser,
       adminUpdateStore,

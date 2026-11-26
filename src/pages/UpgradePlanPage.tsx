@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   AlertTriangle,
@@ -8,20 +8,29 @@ import {
   CheckCircle2,
   Clock,
   Copy,
+  ExternalLink,
   Landmark,
+  Loader2,
   QrCode,
+  RefreshCw,
   ShieldCheck,
   Smartphone,
   Sparkles,
-  Upload,
   X,
 } from 'lucide-react';
 import { DashboardHeader } from '../components/dashboard/DashboardHeader';
 import { useStore } from '../context/StoreContext';
 import { PLATFORM_PLANS, PlanId } from '../data/plans';
 import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
-import { readImageFileAsDataUrl } from '../utils/paymentQr';
-import { PlatformPaymentChannelType } from '../types/schema';
+import { PlatformPaymentChannel, PlatformPaymentChannelType } from '../types/schema';
+import {
+  PaymentGatewayPublicConfig,
+  PaymentSessionIntent,
+  createPaymentSessionIntent,
+  fetchPaymentGatewayConfig,
+  isAllowedPaymongoRedirect,
+  pollPaymentSessionIntent,
+} from '../utils/paymentGateway';
 
 function getChannelIcon(type: PlatformPaymentChannelType) {
   switch (type) {
@@ -50,12 +59,21 @@ function formatBillingDate(isoString?: string): string {
   });
 }
 
+function formatCountdown(expiresAtIso?: string, nowMs = Date.now()): string {
+  if (!expiresAtIso) return '30:00';
+  const diffSec = Math.max(0, Math.floor((new Date(expiresAtIso).getTime() - nowMs) / 1000));
+  const mins = Math.floor(diffSec / 60);
+  const secs = diffSec % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
 export function UpgradePlanPage() {
   const {
     state,
     navigate,
     updateUserProfile,
     recordSubscriptionPayment,
+    confirmGatewaySubscription,
     platformPaymentSettings,
     pushToast,
   } = useStore();
@@ -102,22 +120,55 @@ export function UpgradePlanPage() {
     [state.subscriptionTransactions, user?.id]
   );
 
-  const availableChannels = useMemo(
+  const [gatewayConfig, setGatewayConfig] = useState<PaymentGatewayPublicConfig | null>(null);
+
+  useEffect(() => {
+    fetchPaymentGatewayConfig()
+      .then((cfg) => setGatewayConfig(cfg))
+      .catch(() => {
+        // Fallback silently if offline
+      });
+  }, []);
+
+  const configuredChannels = useMemo(
     () => platformPaymentSettings.channels.filter((c) => c.enabled),
     [platformPaymentSettings.channels]
   );
+
+  const availableChannels = useMemo<PlatformPaymentChannel[]>(() => {
+    if (configuredChannels.length > 0) return configuredChannels;
+    if (gatewayConfig?.engine === 'paymongo') {
+      return [
+        {
+          id: 'qrph',
+          type: 'ewallet',
+          label: 'GCash / Maya / QR Ph',
+          subtitle: 'Instant local checkout via PayMongo',
+          enabled: true,
+          requiresReceipt: false,
+          accountName: 'PayMongo Checkout',
+          numberLabel: 'Gateway',
+          accountNumber: 'QR Ph / E-Wallets / PH Banks',
+        },
+      ];
+    }
+    return [];
+  }, [configuredChannels, gatewayConfig?.engine]);
 
   const [selectedPlanId, setSelectedPlanId] = useState<PlanId>('pro');
   const [selectedChannelId, setSelectedChannelId] = useState<string>(
     () => availableChannels[0]?.id ?? ''
   );
-  const [proofUrl, setProofUrl] = useState('');
-  const [proofError, setProofError] = useState<string | null>(null);
-  const [shakeProof, setShakeProof] = useState(false);
   const [copiedNumber, setCopiedNumber] = useState(false);
+  const [copiedExactAmount, setCopiedExactAmount] = useState(false);
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [cancelModalOpen, setCancelModalOpen] = useState(false);
-  const [isSubmittingPayment, setIsSubmittingPayment] = useState(false);
+
+  // Zero-receipt live payment session state
+  const [paymentSession, setPaymentSession] = useState<PaymentSessionIntent | null>(null);
+  const [isCreatingSession, setIsCreatingSession] = useState(false);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   // Confirmation banner state
   const [completedUpgrade, setCompletedUpgrade] = useState<{
@@ -126,8 +177,6 @@ export function UpgradePlanPage() {
     paymentLabel: string;
     referenceId: string;
   } | null>(null);
-
-  const proofInputRef = useRef<HTMLInputElement | null>(null);
 
   useBodyScrollLock(cancelModalOpen || paymentModalOpen);
 
@@ -181,13 +230,108 @@ export function UpgradePlanPage() {
   const isRenewalDue = isSamePlan && isPlanDue;
   const requiresPayment = selectedPlan.monthlyPrice > 0 && (!isSamePlan || isRenewalDue);
 
-  const triggerProofShake = () => {
-    setShakeProof(false);
-    window.requestAnimationFrame(() => {
-      setShakeProof(true);
-      window.setTimeout(() => setShakeProof(false), 400);
-    });
-  };
+  // Check URL return from PayMongo redirect (?payment_session=...)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const returnedSessionId = params.get('payment_session');
+    if (!returnedSessionId) return;
+
+    pollPaymentSessionIntent(returnedSessionId)
+      .then(async (session) => {
+        if (session.status === 'paid') {
+          await confirmGatewaySubscription({
+            referenceId: session.referenceCode,
+            planId: 'pro',
+            amount: session.baseAmount,
+            paymentMethod: session.channelLabel || 'PayMongo',
+          });
+          setCompletedUpgrade({
+            planName: 'Pro',
+            priceLabel: `₱${session.baseAmount} / month`,
+            paymentLabel: session.channelLabel || 'PayMongo',
+            referenceId: session.referenceCode,
+          });
+          pushToast({
+            type: 'success',
+            title: 'Payment confirmed — Pro Plan activated',
+            description: `Reference ${session.referenceCode} verified automatically.`,
+          });
+        }
+      })
+      .catch(() => {
+        // Ignore stale session IDs
+      });
+  }, [confirmGatewaySubscription, pushToast]);
+
+  // Countdown tick while waiting for payment
+  useEffect(() => {
+    if (!paymentModalOpen || !paymentSession || paymentSession.status !== 'awaiting_payment') return;
+    const timer = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [paymentModalOpen, paymentSession]);
+
+  // Poll live status for active awaiting_payment session
+  useEffect(() => {
+    if (!paymentModalOpen || !paymentSession || paymentSession.status !== 'awaiting_payment') return;
+    let active = true;
+
+    const checkStatus = async () => {
+      try {
+        const latest = await pollPaymentSessionIntent(paymentSession.id, paymentSession.readToken);
+        if (!active) return;
+        setPaymentSession((prev) =>
+          prev
+            ? {
+                ...latest,
+                readToken: prev.readToken,
+              }
+            : latest
+        );
+
+        if (latest.status === 'paid') {
+          await confirmGatewaySubscription({
+            referenceId: latest.referenceCode,
+            planId: 'pro',
+            amount: latest.baseAmount,
+            paymentMethod: latest.channelLabel || activeChannel?.label || 'Local Payment',
+          });
+          if (!active) return;
+          setCompletedUpgrade({
+            planName: selectedPlan.name,
+            priceLabel: `${selectedPlan.priceLabel} / month`,
+            paymentLabel: latest.channelLabel || activeChannel?.label || 'Local Payment',
+            referenceId: latest.referenceCode,
+          });
+          pushToast({
+            type: 'success',
+            title: 'Payment confirmed automatically',
+            description: `${selectedPlan.name} plan activated for ${latest.referenceCode} without receipt upload.`,
+          });
+        }
+      } catch {
+        // Keep polling gracefully on transient network hiccups
+      }
+    };
+
+    const interval = window.setInterval(checkStatus, 2500);
+    window.addEventListener('focus', checkStatus);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+      window.removeEventListener('focus', checkStatus);
+    };
+  }, [
+    paymentModalOpen,
+    paymentSession,
+    activeChannel?.label,
+    confirmGatewaySubscription,
+    pushToast,
+    selectedPlan.name,
+    selectedPlan.priceLabel,
+  ]);
 
   const handleSelectPlan = (planId: PlanId) => {
     const isPayingDueCurrentPlan = planId === currentPlanId && isPlanDue;
@@ -208,9 +352,10 @@ export function UpgradePlanPage() {
 
     setSelectedPlanId(planId);
     setCompletedUpgrade(null);
-    setProofUrl('');
-    setProofError(null);
+    setPaymentSession(null);
+    setSessionError(null);
     setCopiedNumber(false);
+    setCopiedExactAmount(false);
     setPaymentModalOpen(true);
   };
 
@@ -258,43 +403,26 @@ export function UpgradePlanPage() {
     });
   };
 
-  const handleProofChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
+  const handleCopyText = async (value: string, type: 'number' | 'amount') => {
     try {
-      const dataUrl = await readImageFileAsDataUrl(file);
-      setProofUrl(dataUrl);
-      setProofError(null);
-      setShakeProof(false);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unable to upload receipt image.';
-      setProofError(message);
-      triggerProofShake();
-      pushToast({
-        type: 'error',
-        title: 'Invalid Receipt File',
-        description: message,
-      });
-    }
-  };
-
-  const handleCopyAccountNumber = async (num: string) => {
-    try {
-      await navigator.clipboard.writeText(num);
-      setCopiedNumber(true);
-      window.setTimeout(() => setCopiedNumber(false), 1800);
+      await navigator.clipboard.writeText(value);
+      if (type === 'number') {
+        setCopiedNumber(true);
+        window.setTimeout(() => setCopiedNumber(false), 1800);
+      } else {
+        setCopiedExactAmount(true);
+        window.setTimeout(() => setCopiedExactAmount(false), 1800);
+      }
     } catch {
-      // Clipboard API fallback ignored
+      // Ignore restricted clipboard
     }
   };
 
-  const handleSubmitUpgrade = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (isSubmittingPayment) return;
+  const handleStartZeroReceiptSession = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (isCreatingSession) return;
     if (isSamePlan && !isRenewalDue) return;
 
-    // Selecting Free (Starter) while on a paid plan opens the Cancel Paid Plan flow
     if (selectedPlan.monthlyPrice === 0) {
       if (isPaidPlan && !isCancellationScheduled) {
         setCancelModalOpen(true);
@@ -313,55 +441,46 @@ export function UpgradePlanPage() {
       return;
     }
 
-    if (activeChannel.requiresReceipt && !proofUrl) {
-      setProofError('Please upload your payment receipt.');
-      triggerProofShake();
-      pushToast({
-        type: 'error',
-        title: 'Payment Receipt Required',
-        description: 'Please upload your payment receipt.',
-      });
-      return;
-    }
-
     if (!user) return;
 
-    const referenceId = `SUB-${Date.now().toString().slice(-6)}`;
-    setIsSubmittingPayment(true);
-    const res = await recordSubscriptionPayment({
-      userId: user.id,
-      userName: user.name,
-      userEmail: user.email,
-      planId: selectedPlan.id,
-      amount: selectedPlan.monthlyPrice,
-      paymentMethod: activeChannel.label,
-      referenceId,
-      status: 'pending',
-      dueDate: isRenewalDue ? resolvedPeriodEndsAt : undefined,
-      proofUrl: proofUrl || undefined,
-    });
-    setIsSubmittingPayment(false);
+    setIsCreatingSession(true);
+    setSessionError(null);
+    try {
+      const session = await createPaymentSessionIntent({
+        targetType: 'subscription',
+        channel: activeChannel.id,
+        channelLabel: activeChannel.label,
+        planId: 'pro',
+        baseAmount: selectedPlan.monthlyPrice,
+        currency: 'PHP',
+      });
+      setPaymentSession(session);
+      setNowMs(Date.now());
 
-    if (!res.success) {
-      setProofError(res.error || 'Unable to submit payment to database.');
-      triggerProofShake();
-      return;
+      // Record pending subscription transaction tied to this exact reference code (no receipt needed)
+      await recordSubscriptionPayment({
+        userId: user.id,
+        userName: user.name,
+        userEmail: user.email,
+        planId: selectedPlan.id,
+        amount: selectedPlan.monthlyPrice,
+        paymentMethod: activeChannel.label,
+        referenceId: session.referenceCode,
+        status: 'pending',
+        dueDate: isRenewalDue ? resolvedPeriodEndsAt : undefined,
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Unable to initialize payment gateway session.';
+      setSessionError(message);
+      pushToast({
+        type: 'error',
+        title: 'Payment Session Failed',
+        description: message,
+      });
+    } finally {
+      setIsCreatingSession(false);
     }
-
-    setCompletedUpgrade({
-      planName: selectedPlan.name,
-      priceLabel: `${selectedPlan.priceLabel} / month`,
-      paymentLabel: activeChannel.label,
-      referenceId,
-    });
-    setProofUrl('');
-    setProofError(null);
-    setPaymentModalOpen(false);
-    pushToast({
-      type: 'info',
-      title: 'Payment submitted for approval',
-      description: `Reference ${referenceId} is pending admin approval. You will be notified once completed.`,
-    });
   };
 
   return (
@@ -384,7 +503,7 @@ export function UpgradePlanPage() {
               Subscription Plans &amp; Billing
             </h1>
             <p className="text-sm text-slate-600">
-              Choose a plan that fits your brand and pay directly to activate your upgrade.
+              Choose a plan and pay via GCash, Maya, or PH Bank Transfer with automatic confirmation—no receipt upload required.
             </p>
           </div>
 
@@ -504,8 +623,8 @@ export function UpgradePlanPage() {
                 </p>
                 <p className="text-xs sm:text-sm text-amber-900 leading-relaxed">
                   Your billing period ended on <strong>{periodEndsAtFormatted}</strong> and your
-                  active storefronts are temporarily closed. Pay your due plan now to upload your
-                  receipt and reopen full access.
+                  active storefronts are temporarily closed. Pay your due plan now to automatically
+                  reopen full access.
                 </p>
               </div>
             </div>
@@ -520,38 +639,59 @@ export function UpgradePlanPage() {
           </div>
         )}
 
-        {/* Pending Payment Approval Notice */}
-        {(pendingSubscriptionTx || completedUpgrade) && (
-          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        {/* Confirmed or Pending Payment Notice */}
+        {completedUpgrade ? (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div className="flex items-start gap-3">
-              <Clock className="w-6 h-6 text-amber-700 shrink-0 mt-0.5" />
+              <CheckCircle2 className="w-6 h-6 text-emerald-700 shrink-0 mt-0.5" />
               <div className="space-y-1">
-                <p className="text-base font-bold text-slate-900">
-                  {pendingSubscriptionTx
-                    ? 'Pro Plan payment pending admin approval'
-                    : `${completedUpgrade?.planName} Plan payment submitted!`}
+                <p className="text-base font-bold text-emerald-950">
+                  {completedUpgrade.planName} Plan Activated!
                 </p>
-                <p className="text-xs sm:text-sm text-slate-700">
-                  Reference{' '}
-                  <span className="font-mono font-semibold">
-                    {pendingSubscriptionTx?.referenceId ?? completedUpgrade?.referenceId}
-                  </span>{' '}
-                  ·{' '}
-                  {pendingSubscriptionTx
-                    ? `₱${pendingSubscriptionTx.amount} / month via ${pendingSubscriptionTx.paymentMethod}`
-                    : `${completedUpgrade?.priceLabel} via ${completedUpgrade?.paymentLabel}`}
-                  . We&apos;ll send a Payment Completed notification once an admin approves it.
+                <p className="text-xs sm:text-sm text-emerald-900">
+                  Reference <span className="font-mono font-semibold">{completedUpgrade.referenceId}</span>{' '}
+                  · {completedUpgrade.priceLabel} via {completedUpgrade.paymentLabel}. Payment
+                  confirmed automatically—all Pro templates and multi-store limits are unlocked.
                 </p>
               </div>
             </div>
             <button
               type="button"
               onClick={() => navigate({ name: 'dashboard' })}
-              className="min-h-[42px] px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl cursor-pointer shrink-0"
+              className="min-h-[42px] px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl cursor-pointer shrink-0"
             >
-              Return to Dashboard
+              Go to Dashboard
             </button>
           </div>
+        ) : (
+          pendingSubscriptionTx && (
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <Clock className="w-6 h-6 text-amber-700 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="text-base font-bold text-slate-900">
+                    Pro Plan awaiting transfer confirmation
+                  </p>
+                  <p className="text-xs sm:text-sm text-slate-700">
+                    Reference{' '}
+                    <span className="font-mono font-semibold">
+                      {pendingSubscriptionTx.referenceId}
+                    </span>{' '}
+                    · ₱{pendingSubscriptionTx.amount} / month via{' '}
+                    {pendingSubscriptionTx.paymentMethod}. Your plan activates automatically as soon
+                    as the transfer alert is received.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate({ name: 'dashboard' })}
+                className="min-h-[42px] px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl cursor-pointer shrink-0"
+              >
+                Return to Dashboard
+              </button>
+            </div>
+          )
         )}
 
         {/* Platform Plans Grid */}
@@ -658,7 +798,7 @@ export function UpgradePlanPage() {
                     }`}
                   >
                     {isPendingThisPlan
-                      ? 'Pending Admin Approval'
+                      ? 'Awaiting Payment Confirmation'
                       : isDueRenewalCard
                         ? `Pay Due Plan (${plan.priceLabel})`
                         : isCurrent
@@ -678,7 +818,7 @@ export function UpgradePlanPage() {
         </section>
       </main>
 
-      {/* Pay for Plan Modal */}
+      {/* Zero-Receipt Pay for Plan Modal */}
       {paymentModalOpen && requiresPayment && (
         <div
           role="dialog"
@@ -708,9 +848,7 @@ export function UpgradePlanPage() {
                   </span>
                 </div>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  {isRenewalDue
-                    ? 'Settle your unpaid plan balance to reopen all temporarily closed active stores.'
-                    : 'Choose your preferred payment method below to complete your subscription.'}
+                  Instant local payment via GCash, Maya, or Bank Transfer—no receipt upload needed.
                 </p>
               </div>
 
@@ -726,12 +864,12 @@ export function UpgradePlanPage() {
 
             {/* Scrollable Checkout Body */}
             <form
-              onSubmit={handleSubmitUpgrade}
+              onSubmit={handleStartZeroReceiptSession}
               noValidate
               className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-6"
             >
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-                {/* Left: Payment Methods & Instructions */}
+                {/* Left: Method Selector & Live Zero-Receipt Payment View */}
                 <div className="lg:col-span-7 space-y-4">
                   {availableChannels.length === 0 ? (
                     <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 text-center space-y-2">
@@ -755,10 +893,13 @@ export function UpgradePlanPage() {
                             <button
                               key={channel.id}
                               type="button"
+                              disabled={Boolean(paymentSession && paymentSession.status === 'paid')}
                               onClick={() => {
                                 setSelectedChannelId(channel.id);
-                                setProofError(null);
+                                setPaymentSession(null);
+                                setSessionError(null);
                                 setCopiedNumber(false);
+                                setCopiedExactAmount(false);
                               }}
                               className={`p-3 rounded-xl border text-left flex items-center justify-between gap-3 cursor-pointer transition-all ${
                                 active
@@ -791,179 +932,219 @@ export function UpgradePlanPage() {
                         })}
                       </div>
 
-                      {/* QR + Account Details + Upload Receipt */}
-                      {activeChannel && (
-                        <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4 space-y-4">
-                          <div className="flex flex-col sm:flex-row items-center gap-4">
-                            {/* QR Frame (only when admin uploaded a QR) */}
-                            {activeChannel.qrImageUrl && (
-                              <div className="p-2 bg-white rounded-2xl border border-slate-200 shadow-xs shrink-0">
-                                <img
-                                  src={activeChannel.qrImageUrl}
-                                  alt={`${activeChannel.label} Payment QR`}
-                                  className="w-32 h-32 sm:w-36 sm:h-36 object-contain rounded-lg"
-                                />
-                              </div>
-                            )}
-
-                            {/* Account Name & Number */}
-                            <div
-                              className={`flex-1 w-full space-y-2 ${
-                                activeChannel.qrImageUrl
-                                  ? 'text-center sm:text-left'
-                                  : 'text-left'
-                              }`}
+                      {/* Channel Details OR Live Payment Session */}
+                      {activeChannel && !paymentSession && (
+                        <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4 space-y-3">
+                          <div className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                            <QrCode className="w-4 h-4 text-slate-900" />
+                            <span>{activeChannel.label} — Automated Checkout</span>
+                          </div>
+                          <p className="text-xs text-slate-600 leading-relaxed">
+                            Click <strong>Continue to Pay</strong> on the right to lock in your payment
+                            session. You won&apos;t need to upload any screenshot or receipt—just
+                            complete the transfer and your Pro plan unlocks automatically.
+                          </p>
+                          {sessionError && (
+                            <p
+                              role="alert"
+                              className="flex items-center gap-1.5 text-xs font-medium text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2"
                             >
-                              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white border border-slate-200 text-[11px] font-semibold text-slate-700">
-                                <QrCode className="w-3.5 h-3.5" />
-                                <span>{activeChannel.label} Payment Details</span>
-                              </div>
+                              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                              <span>{sessionError}</span>
+                            </p>
+                          )}
+                        </div>
+                      )}
 
-                              <div>
-                                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                                  Account Name
-                                </p>
-                                <p className="text-sm font-bold text-slate-900">
-                                  {activeChannel.accountName || 'mystore Platform Billing'}
-                                </p>
-                              </div>
+                      {paymentSession && paymentSession.status === 'paid' && (
+                        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-5 text-center space-y-3">
+                          <CheckCircle2 className="w-10 h-10 text-emerald-600 mx-auto" />
+                          <div className="space-y-1">
+                            <p className="text-base font-bold text-emerald-950">
+                              Payment Confirmed!
+                            </p>
+                            <p className="text-xs text-emerald-800">
+                              Reference <span className="font-mono font-bold">{paymentSession.referenceCode}</span>{' '}
+                              verified automatically. Your {selectedPlan.name} plan is now active.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setPaymentModalOpen(false)}
+                            className="min-h-[40px] px-5 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl cursor-pointer"
+                          >
+                            Done
+                          </button>
+                        </div>
+                      )}
 
-                              {activeChannel.accountNumber && (
-                                <div>
-                                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                                    {activeChannel.numberLabel || 'Account Number'}
-                                  </p>
-                                  <div
-                                    className={`flex items-center gap-2 mt-0.5 flex-wrap ${
-                                      activeChannel.qrImageUrl
-                                        ? 'justify-center sm:justify-start'
-                                        : 'justify-start'
-                                    }`}
-                                  >
-                                    <span className="text-base font-mono font-bold text-slate-900 select-all">
-                                      {activeChannel.accountNumber}
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        handleCopyAccountNumber(activeChannel.accountNumber)
-                                      }
-                                      className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold bg-white border border-slate-200 rounded-md hover:bg-slate-100 cursor-pointer"
-                                    >
-                                      {copiedNumber ? (
-                                        <>
-                                          <Check className="w-3 h-3 text-emerald-600" />
-                                          <span>Copied</span>
-                                        </>
-                                      ) : (
-                                        <>
-                                          <Copy className="w-3 h-3" />
-                                          <span>Copy</span>
-                                        </>
-                                      )}
-                                    </button>
-                                  </div>
-                                </div>
-                              )}
+                      {paymentSession && paymentSession.status === 'expired' && (
+                        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 text-center space-y-3">
+                          <Clock className="w-8 h-8 text-amber-700 mx-auto" />
+                          <div className="space-y-1">
+                            <p className="text-sm font-bold text-amber-950">
+                              Payment session expired
+                            </p>
+                            <p className="text-xs text-amber-800">
+                              The 30-minute transfer window elapsed. Generate a fresh exact amount to
+                              continue.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleStartZeroReceiptSession()}
+                            className="inline-flex items-center gap-1.5 min-h-[38px] px-4 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl cursor-pointer"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            <span>Generate New Amount</span>
+                          </button>
+                        </div>
+                      )}
 
-                              {activeChannel.note && (
-                                <p className="text-xs text-slate-500">{activeChannel.note}</p>
-                              )}
+                      {paymentSession && paymentSession.status === 'awaiting_payment' && (
+                        <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4 space-y-4">
+                          {/* Live Listening Header */}
+                          <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-200/80">
+                            <div className="inline-flex items-center gap-2 text-xs font-semibold text-emerald-700">
+                              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                              <span>Listening for payment confirmation...</span>
                             </div>
+                            <span className="text-xs font-mono font-bold text-slate-700 tabular-nums">
+                              Expires in {formatCountdown(paymentSession.expiresAt, nowMs)}
+                            </span>
                           </div>
 
-                          {/* Upload Proof of Payment */}
-                          {activeChannel.requiresReceipt && (
-                            <div className="pt-3 border-t border-slate-200/80 space-y-2">
-                              <label className="block text-xs font-semibold text-slate-700">
-                                Upload Proof of Payment (Receipt){' '}
-                                <span className="text-rose-500">*</span>
-                              </label>
-                              <input
-                                ref={proofInputRef}
-                                type="file"
-                                accept="image/*"
-                                onChange={handleProofChange}
-                                className="hidden"
-                                aria-label="Upload subscription payment receipt"
-                              />
-
-                              {proofUrl ? (
-                                <div className="p-3 bg-white border border-slate-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                                  <div className="flex items-center gap-3 flex-1 min-w-0">
-                                    <img
-                                      src={proofUrl}
-                                      alt="Uploaded payment proof"
-                                      className="w-14 h-14 rounded-lg object-cover border border-slate-200 shrink-0"
-                                    />
-                                    <div className="flex-1 min-w-0">
-                                      <p className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                                        <span className="truncate">Receipt Attached</span>
-                                      </p>
-                                      <p className="text-[11px] text-slate-500 truncate mt-0.5">
-                                        {isRenewalDue
-                                          ? `Ready to settle ${selectedPlan.name} due balance`
-                                          : `Ready to activate ${selectedPlan.name} plan`}
-                                      </p>
-                                    </div>
-                                  </div>
-                                  <div className="grid grid-cols-2 sm:flex sm:items-center gap-2 sm:gap-1.5 w-full sm:w-auto shrink-0">
-                                    <button
-                                      type="button"
-                                      onClick={() => proofInputRef.current?.click()}
-                                      className="min-h-[36px] px-3 py-1.5 text-xs font-semibold text-slate-800 bg-slate-50 sm:bg-white border border-slate-200 rounded-lg hover:bg-slate-100 sm:hover:bg-slate-50 cursor-pointer text-center"
-                                    >
-                                      Change
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setProofUrl('');
-                                        setProofError(null);
-                                      }}
-                                      className="min-h-[36px] px-3 py-1.5 text-xs font-semibold text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 cursor-pointer text-center"
-                                    >
-                                      Remove
-                                    </button>
-                                  </div>
+                          {paymentSession.provider === 'paymongo' &&
+                          isAllowedPaymongoRedirect(paymentSession.checkoutUrl) ? (
+                            <div className="space-y-3 text-center py-2">
+                              <p className="text-xs text-slate-600 leading-relaxed">
+                                Complete your payment securely on PayMongo using{' '}
+                                <strong>GCash, Maya, QR Ph, or Online Banking</strong>. No receipt upload
+                                required.
+                              </p>
+                              <a
+                                href={paymentSession.checkoutUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center justify-center gap-2 min-h-[44px] px-5 py-2.5 text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl transition-colors"
+                              >
+                                <span>Open PayMongo Checkout</span>
+                                <ExternalLink className="w-4 h-4" />
+                              </a>
+                            </div>
+                          ) : (
+                            <>
+                              {/* Exact Unique Centavo Amount Card */}
+                              <div className="bg-white border-2 border-slate-900 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                <div>
+                                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                    Transfer Exact Amount (Auto-Match)
+                                  </p>
+                                  <p className="text-2xl font-extrabold font-mono tabular-nums text-slate-900 mt-0.5">
+                                    ₱{paymentSession.uniquePayableAmount.toFixed(2)}
+                                  </p>
+                                  <p className="text-[11px] text-slate-500 mt-0.5">
+                                    Send exact centavos so we unlock Pro automatically—no receipt needed.
+                                  </p>
                                 </div>
-                              ) : (
                                 <button
                                   type="button"
-                                  onClick={() => proofInputRef.current?.click()}
-                                  className={`w-full p-4 bg-white rounded-xl border border-dashed flex flex-col items-center justify-center gap-1.5 text-center cursor-pointer transition-all ${
-                                    shakeProof ? 'auth-shake' : ''
-                                  } ${
-                                    proofError
-                                      ? 'border-rose-400 ring-4 ring-rose-500/15'
-                                      : 'border-slate-300 hover:border-slate-400'
-                                  }`}
+                                  onClick={() =>
+                                    handleCopyText(
+                                      paymentSession.uniquePayableAmount.toFixed(2),
+                                      'amount'
+                                    )
+                                  }
+                                  className="inline-flex items-center justify-center gap-1.5 min-h-[36px] px-3 py-1.5 text-xs font-semibold bg-slate-900 text-white hover:bg-slate-800 rounded-lg cursor-pointer shrink-0"
                                 >
-                                  <Upload
-                                    className={`w-5 h-5 ${
-                                      proofError ? 'text-rose-500' : 'text-slate-700'
-                                    }`}
-                                  />
-                                  <span className="text-xs font-bold text-slate-900">
-                                    Tap to Upload Proof of Payment (Receipt)
-                                  </span>
-                                  <span className="text-[11px] text-slate-500">
-                                    PNG, JPG, or screenshot of your transfer receipt
-                                  </span>
+                                  {copiedExactAmount ? (
+                                    <>
+                                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                      <span>Copied Amount</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Copy className="w-3.5 h-3.5" />
+                                      <span>Copy Exact ₱</span>
+                                    </>
+                                  )}
                                 </button>
-                              )}
+                              </div>
 
-                              {proofError && (
-                                <p
-                                  role="alert"
-                                  className="flex items-center gap-1.5 text-xs font-medium text-rose-600"
-                                >
-                                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                                  <span>{proofError}</span>
-                                </p>
+                              {/* QR + Account Details */}
+                              {activeChannel && (
+                                <div className="flex flex-col sm:flex-row items-center gap-4">
+                                  {activeChannel.qrImageUrl && (
+                                    <div className="p-2 bg-white rounded-2xl border border-slate-200 shadow-xs shrink-0">
+                                      <img
+                                        src={activeChannel.qrImageUrl}
+                                        alt={`${activeChannel.label} Payment QR`}
+                                        className="w-32 h-32 sm:w-36 sm:h-36 object-contain rounded-lg"
+                                      />
+                                    </div>
+                                  )}
+
+                                  <div
+                                    className={`flex-1 w-full space-y-2 ${
+                                      activeChannel.qrImageUrl
+                                        ? 'text-center sm:text-left'
+                                        : 'text-left'
+                                    }`}
+                                  >
+                                    <div>
+                                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                        Account Name
+                                      </p>
+                                      <p className="text-sm font-bold text-slate-900">
+                                        {activeChannel.accountName || 'mystore Platform Billing'}
+                                      </p>
+                                    </div>
+
+                                    {activeChannel.accountNumber && (
+                                      <div>
+                                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                          {activeChannel.numberLabel || 'Account Number'}
+                                        </p>
+                                        <div
+                                          className={`flex items-center gap-2 mt-0.5 flex-wrap ${
+                                            activeChannel.qrImageUrl
+                                              ? 'justify-center sm:justify-start'
+                                              : 'justify-start'
+                                          }`}
+                                        >
+                                          <span className="text-base font-mono font-bold text-slate-900 select-all">
+                                            {activeChannel.accountNumber}
+                                          </span>
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              handleCopyText(activeChannel.accountNumber, 'number')
+                                            }
+                                            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold bg-white border border-slate-200 rounded-md hover:bg-slate-100 cursor-pointer"
+                                          >
+                                            {copiedNumber ? (
+                                              <>
+                                                <Check className="w-3 h-3 text-emerald-600" />
+                                                <span>Copied</span>
+                                              </>
+                                            ) : (
+                                              <>
+                                                <Copy className="w-3 h-3" />
+                                                <span>Copy</span>
+                                              </>
+                                            )}
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    <p className="text-[11px] font-mono text-slate-500">
+                                      Session Ref: {paymentSession.referenceCode}
+                                    </p>
+                                  </div>
+                                </div>
                               )}
-                            </div>
+                            </>
                           )}
                         </div>
                       )}
@@ -1007,40 +1188,59 @@ export function UpgradePlanPage() {
                       </dd>
                     </div>
                     <div className="pt-3 border-t border-slate-200 flex items-baseline justify-between">
-                      <dt className="text-sm font-bold text-slate-900">Total Due</dt>
+                      <dt className="text-sm font-bold text-slate-900">
+                        {paymentSession ? 'Exact Payable Total' : 'Total Due'}
+                      </dt>
                       <dd className="text-xl font-extrabold font-mono tabular-nums text-slate-900">
-                        {selectedPlan.priceLabel}
-                        <span className="text-xs font-sans font-medium text-slate-500 ml-1">
-                          /mo
-                        </span>
+                        {paymentSession
+                          ? `₱${paymentSession.uniquePayableAmount.toFixed(2)}`
+                          : selectedPlan.priceLabel}
+                        {!paymentSession && (
+                          <span className="text-xs font-sans font-medium text-slate-500 ml-1">
+                            /mo
+                          </span>
+                        )}
                       </dd>
                     </div>
                   </dl>
 
                   <div className="space-y-2 pt-1">
-                    <button
-                      type="submit"
-                      disabled={!activeChannel || isSubmittingPayment}
-                      className="w-full min-h-[46px] px-5 py-3 text-sm font-semibold rounded-xl bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed text-white transition-colors cursor-pointer"
-                    >
-                      {isSubmittingPayment
-                        ? 'Submitting payment...'
-                        : isRenewalDue
-                        ? `Pay ${selectedPlan.priceLabel} & Settle Due Plan`
-                        : `Pay ${selectedPlan.priceLabel} & Activate ${selectedPlan.name}`}
-                    </button>
+                    {!paymentSession ? (
+                      <button
+                        type="submit"
+                        disabled={!activeChannel || isCreatingSession}
+                        className="w-full min-h-[46px] px-5 py-3 text-sm font-semibold rounded-xl bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed text-white transition-colors cursor-pointer inline-flex items-center justify-center gap-2"
+                      >
+                        {isCreatingSession ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <span>Preparing Payment...</span>
+                          </>
+                        ) : isRenewalDue ? (
+                          `Continue to Pay (${selectedPlan.priceLabel})`
+                        ) : (
+                          `Continue to Pay (${selectedPlan.priceLabel})`
+                        )}
+                      </button>
+                    ) : paymentSession.status === 'awaiting_payment' ? (
+                      <div className="w-full min-h-[46px] px-4 py-3 text-xs font-semibold rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 flex items-center justify-center gap-2 text-center">
+                        <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                        <span>Waiting for automatic payment alert...</span>
+                      </div>
+                    ) : null}
+
                     <button
                       type="button"
                       onClick={() => setPaymentModalOpen(false)}
                       className="w-full min-h-[40px] px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-white hover:bg-slate-100 border border-slate-200/80 rounded-xl transition-colors cursor-pointer"
                     >
-                      Cancel
+                      {paymentSession?.status === 'paid' ? 'Close' : 'Cancel'}
                     </button>
                   </div>
 
                   <p className="flex items-center justify-center gap-1.5 text-[11px] text-slate-500">
                     <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                    <span>Plan perks activate immediately after confirmation.</span>
+                    <span>Zero receipt upload · Activates automatically on confirmation.</span>
                   </p>
                 </div>
               </div>

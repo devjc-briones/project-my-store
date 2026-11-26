@@ -112,18 +112,18 @@ function QrCodeUploader({
               ) : (
                 <span
                   className={`inline-flex items-center gap-1 text-[11px] font-semibold ${
-                    hasWarning ? 'text-rose-600' : 'text-amber-700'
+                    hasWarning ? 'text-rose-600' : 'text-slate-500'
                   }`}
                 >
-                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                  Required to enable
+                  {hasWarning && <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
+                  {hasWarning ? 'QR or account # required' : 'Optional (recommended)'}
                 </span>
               )}
             </div>
             <p className="text-[11px] text-slate-500 mt-0.5">
               {qrImageUrl
-                ? 'Customers will scan this QR code during checkout.'
-                : 'Upload your store QR image first before enabling this online payment.'}
+                ? 'Customers scan this QR and pay the exact auto-matched amount (no receipt upload).'
+                : 'Upload a QR image or enter your account/mobile number below to enable Zero-Receipt checkout.'}
             </p>
           </div>
         </div>
@@ -284,7 +284,7 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
     Math.round(sampleSubtotal * ((settings.serviceChargePercent ?? 0) / 100) * 100) / 100;
   const simulatedTotal = sampleSubtotal + shippingApplied + taxApplied + serviceApplied;
 
-  const triggerQrWarning = (method: OnlineQrMethod, methodLabel: string) => {
+  const triggerDestinationWarning = (method: OnlineQrMethod, methodLabel: string) => {
     setQrWarningMethod(method);
     setShakeMethod(null);
     window.requestAnimationFrame(() => {
@@ -293,14 +293,17 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
     });
     pushToast({
       type: 'error',
-      title: 'QR Code Required',
-      description: `Please upload a ${methodLabel} QR code first to enable online payment.`,
+      title: `${methodLabel} Details Required`,
+      description: `Enter a ${methodLabel} account/mobile number or upload a QR code first to enable.`,
     });
   };
 
   const handleToggleGcash = () => {
-    if (!settings.gcashEnabled && !settings.gcashDetails.qrImageUrl) {
-      triggerQrWarning('gcash', 'GCash');
+    const hasDestination = Boolean(
+      settings.gcashDetails.qrImageUrl || settings.gcashDetails.mobileNumber.trim()
+    );
+    if (!settings.gcashEnabled && !hasDestination) {
+      triggerDestinationWarning('gcash', 'GCash');
       return;
     }
     setQrWarningMethod((curr) => (curr === 'gcash' ? null : curr));
@@ -308,8 +311,11 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
   };
 
   const handleToggleMaya = () => {
-    if (!settings.mayaEnabled && !settings.mayaDetails.qrImageUrl) {
-      triggerQrWarning('maya', 'Maya');
+    const hasDestination = Boolean(
+      settings.mayaDetails.qrImageUrl || settings.mayaDetails.mobileNumber.trim()
+    );
+    if (!settings.mayaEnabled && !hasDestination) {
+      triggerDestinationWarning('maya', 'Maya');
       return;
     }
     setQrWarningMethod((curr) => (curr === 'maya' ? null : curr));
@@ -317,8 +323,11 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
   };
 
   const handleToggleBank = () => {
-    if (!settings.bankTransferEnabled && !settings.bankDetails.qrImageUrl) {
-      triggerQrWarning('bank', 'Bank Transfer');
+    const hasDestination = Boolean(
+      settings.bankDetails.qrImageUrl || settings.bankDetails.accountNumber.trim()
+    );
+    if (!settings.bankTransferEnabled && !hasDestination) {
+      triggerDestinationWarning('bank', 'Bank Transfer');
       return;
     }
     setQrWarningMethod((curr) => (curr === 'bank' ? null : curr));
@@ -333,7 +342,7 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
           <div>
             <h2 className="text-base font-bold text-slate-900">Accepted Payment Methods</h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Upload a QR code image to enable online payment channels (GCash, Maya, Bank Transfer).
+              Zero-Receipt Exact-Amount / Gateway mode is active: add a QR code or account number to enable GCash, Maya, or Bank Transfer—customers never upload receipt screenshots.
             </p>
           </div>
 
@@ -374,14 +383,17 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
                 });
               }}
               onRemove={() => {
+                const hasMobile = Boolean(settings.gcashDetails.mobileNumber.trim());
                 onChange({
-                  gcashEnabled: false,
+                  gcashEnabled: hasMobile ? settings.gcashEnabled : false,
                   gcashDetails: { ...settings.gcashDetails, qrImageUrl: undefined },
                 });
                 pushToast({
                   type: 'info',
                   title: 'GCash QR removed',
-                  description: 'GCash was disabled until a new QR code is uploaded.',
+                  description: hasMobile
+                    ? 'Customers can still pay using your GCash mobile number.'
+                    : 'GCash was disabled until a QR code or mobile number is added.',
                 });
               }}
               onError={(msg) =>
@@ -389,58 +401,59 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
               }
             />
 
-            {settings.gcashEnabled && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100">
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-slate-600">
-                    Account Name
-                  </label>
-                  <input
-                    type="text"
-                    value={settings.gcashDetails.accountName}
-                    onChange={(e) =>
-                      onChange({
-                        gcashDetails: { ...settings.gcashDetails, accountName: e.target.value },
-                      })
-                    }
-                    placeholder="Account holder name"
-                    className="w-full min-h-[38px] px-3 py-1.5 text-sm bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-slate-600">
-                    GCash Mobile Number
-                  </label>
-                  <input
-                    type="text"
-                    value={settings.gcashDetails.mobileNumber}
-                    onChange={(e) =>
-                      onChange({
-                        gcashDetails: { ...settings.gcashDetails, mobileNumber: e.target.value },
-                      })
-                    }
-                    placeholder="0917 555 0148"
-                    className="w-full min-h-[38px] px-3 py-1.5 text-sm font-mono bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
-                </div>
-                <div className="sm:col-span-2 space-y-1">
-                  <label className="text-[11px] font-semibold text-slate-600">
-                    Customer Transfer Note
-                  </label>
-                  <input
-                    type="text"
-                    value={settings.gcashDetails.qrNote ?? ''}
-                    onChange={(e) =>
-                      onChange({
-                        gcashDetails: { ...settings.gcashDetails, qrNote: e.target.value },
-                      })
-                    }
-                    placeholder="Instructions displayed at checkout..."
-                    className="w-full min-h-[38px] px-3 py-1.5 text-sm bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
-                </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100">
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-slate-600">
+                  Account Name
+                </label>
+                <input
+                  type="text"
+                  value={settings.gcashDetails.accountName}
+                  onChange={(e) =>
+                    onChange({
+                      gcashDetails: { ...settings.gcashDetails, accountName: e.target.value },
+                    })
+                  }
+                  placeholder="Account holder name"
+                  className="w-full min-h-[38px] px-3 py-1.5 text-sm bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
               </div>
-            )}
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-slate-600">
+                  GCash Mobile Number
+                </label>
+                <input
+                  type="text"
+                  value={settings.gcashDetails.mobileNumber}
+                  onChange={(e) => {
+                    if (e.target.value.trim()) {
+                      setQrWarningMethod((curr) => (curr === 'gcash' ? null : curr));
+                    }
+                    onChange({
+                      gcashDetails: { ...settings.gcashDetails, mobileNumber: e.target.value },
+                    });
+                  }}
+                  placeholder="0917 555 0148"
+                  className="w-full min-h-[38px] px-3 py-1.5 text-sm font-mono bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
+              </div>
+              <div className="sm:col-span-2 space-y-1">
+                <label className="text-[11px] font-semibold text-slate-600">
+                  Customer Transfer Note
+                </label>
+                <input
+                  type="text"
+                  value={settings.gcashDetails.qrNote ?? ''}
+                  onChange={(e) =>
+                    onChange({
+                      gcashDetails: { ...settings.gcashDetails, qrNote: e.target.value },
+                    })
+                  }
+                  placeholder="Send the exact amount shown—payment confirms automatically without uploading a receipt."
+                  className="w-full min-h-[38px] px-3 py-1.5 text-sm bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
+              </div>
+            </div>
           </div>
 
           {/* Maya E-Wallet */}
@@ -480,14 +493,17 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
                 });
               }}
               onRemove={() => {
+                const hasMobile = Boolean(settings.mayaDetails.mobileNumber.trim());
                 onChange({
-                  mayaEnabled: false,
+                  mayaEnabled: hasMobile ? settings.mayaEnabled : false,
                   mayaDetails: { ...settings.mayaDetails, qrImageUrl: undefined },
                 });
                 pushToast({
                   type: 'info',
                   title: 'Maya QR removed',
-                  description: 'Maya was disabled until a new QR code is uploaded.',
+                  description: hasMobile
+                    ? 'Customers can still pay using your Maya mobile number.'
+                    : 'Maya was disabled until a QR code or mobile number is added.',
                 });
               }}
               onError={(msg) =>
@@ -495,42 +511,43 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
               }
             />
 
-            {settings.mayaEnabled && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100">
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-slate-600">
-                    Account Name
-                  </label>
-                  <input
-                    type="text"
-                    value={settings.mayaDetails.accountName}
-                    onChange={(e) =>
-                      onChange({
-                        mayaDetails: { ...settings.mayaDetails, accountName: e.target.value },
-                      })
-                    }
-                    placeholder="Account name"
-                    className="w-full min-h-[38px] px-3 py-1.5 text-sm bg-white border border-slate-200/80 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-slate-600">
-                    Maya Mobile Number
-                  </label>
-                  <input
-                    type="text"
-                    value={settings.mayaDetails.mobileNumber}
-                    onChange={(e) =>
-                      onChange({
-                        mayaDetails: { ...settings.mayaDetails, mobileNumber: e.target.value },
-                      })
-                    }
-                    placeholder="0917 555 0199"
-                    className="w-full min-h-[38px] px-3 py-1.5 text-sm font-mono bg-white border border-slate-200/80 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
-                </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100">
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-slate-600">
+                  Account Name
+                </label>
+                <input
+                  type="text"
+                  value={settings.mayaDetails.accountName}
+                  onChange={(e) =>
+                    onChange({
+                      mayaDetails: { ...settings.mayaDetails, accountName: e.target.value },
+                    })
+                  }
+                  placeholder="Account name"
+                  className="w-full min-h-[38px] px-3 py-1.5 text-sm bg-white border border-slate-200/80 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
               </div>
-            )}
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-slate-600">
+                  Maya Mobile Number
+                </label>
+                <input
+                  type="text"
+                  value={settings.mayaDetails.mobileNumber}
+                  onChange={(e) => {
+                    if (e.target.value.trim()) {
+                      setQrWarningMethod((curr) => (curr === 'maya' ? null : curr));
+                    }
+                    onChange({
+                      mayaDetails: { ...settings.mayaDetails, mobileNumber: e.target.value },
+                    });
+                  }}
+                  placeholder="0917 555 0199"
+                  className="w-full min-h-[38px] px-3 py-1.5 text-sm font-mono bg-white border border-slate-200/80 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
+              </div>
+            </div>
           </div>
 
           {/* Bank Transfer */}
@@ -570,14 +587,17 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
                 });
               }}
               onRemove={() => {
+                const hasAccount = Boolean(settings.bankDetails.accountNumber.trim());
                 onChange({
-                  bankTransferEnabled: false,
+                  bankTransferEnabled: hasAccount ? settings.bankTransferEnabled : false,
                   bankDetails: { ...settings.bankDetails, qrImageUrl: undefined },
                 });
                 pushToast({
                   type: 'info',
                   title: 'Bank QR removed',
-                  description: 'Bank Transfer was disabled until a new QR code is uploaded.',
+                  description: hasAccount
+                    ? 'Customers can still pay using your bank account number.'
+                    : 'Bank Transfer was disabled until a QR code or account number is added.',
                 });
               }}
               onError={(msg) =>
@@ -585,54 +605,55 @@ export function PaymentSettingsTab({ settings, onChange }: PaymentSettingsTabPro
               }
             />
 
-            {settings.bankTransferEnabled && (
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-100">
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-slate-600">Bank Name</label>
-                  <input
-                    type="text"
-                    value={settings.bankDetails.bankName}
-                    onChange={(e) =>
-                      onChange({
-                        bankDetails: { ...settings.bankDetails, bankName: e.target.value },
-                      })
-                    }
-                    placeholder="BPI / BDO / UnionBank"
-                    className="w-full min-h-[38px] px-3 py-1.5 text-sm bg-white border border-slate-200/80 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-slate-600">Account Name</label>
-                  <input
-                    type="text"
-                    value={settings.bankDetails.accountName}
-                    onChange={(e) =>
-                      onChange({
-                        bankDetails: { ...settings.bankDetails, accountName: e.target.value },
-                      })
-                    }
-                    placeholder="Store Enterprise Inc."
-                    className="w-full min-h-[38px] px-3 py-1.5 text-sm bg-white border border-slate-200/80 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-slate-600">
-                    Account Number
-                  </label>
-                  <input
-                    type="text"
-                    value={settings.bankDetails.accountNumber}
-                    onChange={(e) =>
-                      onChange({
-                        bankDetails: { ...settings.bankDetails, accountNumber: e.target.value },
-                      })
-                    }
-                    placeholder="0012-3456-7890"
-                    className="w-full min-h-[38px] px-3 py-1.5 text-sm font-mono bg-white border border-slate-200/80 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
-                </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-100">
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-slate-600">Bank Name</label>
+                <input
+                  type="text"
+                  value={settings.bankDetails.bankName}
+                  onChange={(e) =>
+                    onChange({
+                      bankDetails: { ...settings.bankDetails, bankName: e.target.value },
+                    })
+                  }
+                  placeholder="BPI / BDO / UnionBank"
+                  className="w-full min-h-[38px] px-3 py-1.5 text-sm bg-white border border-slate-200/80 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
               </div>
-            )}
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-slate-600">Account Name</label>
+                <input
+                  type="text"
+                  value={settings.bankDetails.accountName}
+                  onChange={(e) =>
+                    onChange({
+                      bankDetails: { ...settings.bankDetails, accountName: e.target.value },
+                    })
+                  }
+                  placeholder="Store Enterprise Inc."
+                  className="w-full min-h-[38px] px-3 py-1.5 text-sm bg-white border border-slate-200/80 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-slate-600">
+                  Account Number
+                </label>
+                <input
+                  type="text"
+                  value={settings.bankDetails.accountNumber}
+                  onChange={(e) => {
+                    if (e.target.value.trim()) {
+                      setQrWarningMethod((curr) => (curr === 'bank' ? null : curr));
+                    }
+                    onChange({
+                      bankDetails: { ...settings.bankDetails, accountNumber: e.target.value },
+                    });
+                  }}
+                  placeholder="0012-3456-7890"
+                  className="w-full min-h-[38px] px-3 py-1.5 text-sm font-mono bg-white border border-slate-200/80 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
+              </div>
+            </div>
           </div>
 
           {/* Cash on Delivery */}
