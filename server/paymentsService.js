@@ -1,52 +1,7 @@
 import crypto from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
-import type { SupabaseClient } from '@supabase/supabase-js';
 
-export type PaymentEngine = 'auto_match' | 'paymongo';
-export type PaymentIntentStatus = 'awaiting_payment' | 'paid' | 'expired' | 'failed';
-export type PaymentTargetType = 'subscription' | 'store_order';
-
-export interface PaymentIntentRecord {
-  id: string;
-  referenceCode: string;
-  readToken: string;
-  targetType: PaymentTargetType;
-  userId?: string;
-  userEmail?: string;
-  userName?: string;
-  storeId?: string;
-  orderId?: string;
-  subscriptionId?: string;
-  planId?: 'starter' | 'pro';
-  channel: string;
-  channelLabel: string;
-  provider: PaymentEngine;
-  currency: string;
-  baseAmount: number;
-  uniquePayableAmount: number;
-  externalSessionId?: string;
-  checkoutUrl?: string;
-  status: PaymentIntentStatus;
-  matchedAlertReference?: string;
-  paidAt?: string;
-  expiresAt: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface IncomingAlertRecord {
-  id: string;
-  idempotencyKey: string;
-  provider: string;
-  channel?: string;
-  amount: number;
-  senderName?: string;
-  externalReference?: string;
-  matchedIntentId?: string;
-  receivedAt: string;
-}
-
-const PLAN_PRICES_PHP: Record<'pro', number> = {
+const PLAN_PRICES_PHP = {
   pro: 369,
 };
 
@@ -54,29 +9,25 @@ const INTENT_TTL_MS = 30 * 60 * 1000;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // In-memory store guarantees instant local/preview functionality alongside Supabase persistence
-const memoryIntents = new Map<string, PaymentIntentRecord>();
-const memoryAlertKeys = new Set<string>();
-const memoryRecentAlerts: IncomingAlertRecord[] = [];
-let runtimeActiveEngine: PaymentEngine =
+const memoryIntents = new Map();
+const memoryAlertKeys = new Set();
+const memoryRecentAlerts = [];
+let runtimeActiveEngine =
   process.env.PAYMENT_ENGINE_DEFAULT === 'paymongo' ? 'paymongo' : 'auto_match';
 
-function getSupabaseServerConfig(): {
-  url: string;
-  serviceKey: string;
-  anonKey: string;
-} {
+function getSupabaseServerConfig() {
   const url = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
   const serviceKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
   const anonKey = (process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '').trim();
   return { url, serviceKey, anonKey };
 }
 
-export function isSupabaseServerAuthConfigured(): boolean {
+export function isSupabaseServerAuthConfigured() {
   const { url, serviceKey, anonKey } = getSupabaseServerConfig();
   return Boolean(url.startsWith('https://') && (serviceKey || anonKey));
 }
 
-function getSupabaseAdminClient(): SupabaseClient | null {
+function getSupabaseAdminClient() {
   const { url, serviceKey } = getSupabaseServerConfig();
   if (!url.startsWith('https://') || !serviceKey) return null;
   return createClient(url, serviceKey, {
@@ -84,7 +35,7 @@ function getSupabaseAdminClient(): SupabaseClient | null {
   });
 }
 
-function getSupabaseAnonOrScopedClient(accessToken?: string): SupabaseClient | null {
+function getSupabaseAnonOrScopedClient(accessToken) {
   const { url, serviceKey, anonKey } = getSupabaseServerConfig();
   const key = serviceKey || anonKey;
   if (!url.startsWith('https://') || !key) return null;
@@ -97,24 +48,19 @@ function getSupabaseAnonOrScopedClient(accessToken?: string): SupabaseClient | n
   });
 }
 
-function constantTimeEquals(a: string, b: string): boolean {
+function constantTimeEquals(a, b) {
   const hashA = crypto.createHash('sha256').update(a).digest();
   const hashB = crypto.createHash('sha256').update(b).digest();
   return crypto.timingSafeEqual(hashA, hashB);
 }
 
-export function extractBearerToken(authHeader?: string | string[]): string | undefined {
+export function extractBearerToken(authHeader) {
   if (!authHeader || typeof authHeader !== 'string') return undefined;
   const match = authHeader.match(/^Bearer\s+(.+)$/i);
   return match ? match[1].trim() : undefined;
 }
 
-export async function verifySupabaseCaller(accessToken?: string): Promise<{
-  authenticated: boolean;
-  userId?: string;
-  email?: string;
-  roleId?: number;
-}> {
+export async function verifySupabaseCaller(accessToken) {
   const { url, serviceKey, anonKey } = getSupabaseServerConfig();
   if (!url.startsWith('https://') || (!serviceKey && !anonKey)) {
     return { authenticated: false };
@@ -147,7 +93,7 @@ export async function verifySupabaseCaller(accessToken?: string): Promise<{
   }
 }
 
-export async function isCallerAdmin(accessToken?: string): Promise<boolean> {
+export async function isCallerAdmin(accessToken) {
   if (!isSupabaseServerAuthConfigured()) {
     return process.env.NODE_ENV !== 'production';
   }
@@ -155,11 +101,11 @@ export async function isCallerAdmin(accessToken?: string): Promise<boolean> {
   return caller.authenticated && caller.roleId === 1;
 }
 
-function roundMoney(value: number): number {
+function roundMoney(value) {
   return Math.round(value * 100) / 100;
 }
 
-function isValidPaymongoCheckoutUrl(rawUrl: unknown): rawUrl is string {
+function isValidPaymongoCheckoutUrl(rawUrl) {
   if (typeof rawUrl !== 'string') return false;
   try {
     const parsed = new URL(rawUrl);
@@ -172,7 +118,7 @@ function isValidPaymongoCheckoutUrl(rawUrl: unknown): rawUrl is string {
   }
 }
 
-function pruneExpiredMemoryIntents(nowMs = Date.now()): void {
+function pruneExpiredMemoryIntents(nowMs = Date.now()) {
   for (const [id, intent] of memoryIntents.entries()) {
     if (intent.status === 'awaiting_payment' && new Date(intent.expiresAt).getTime() <= nowMs) {
       intent.status = 'expired';
@@ -182,7 +128,7 @@ function pruneExpiredMemoryIntents(nowMs = Date.now()): void {
   }
 }
 
-export async function getActiveGatewayEngine(): Promise<PaymentEngine> {
+export async function getActiveGatewayEngine() {
   const adminClient = getSupabaseAdminClient() || getSupabaseAnonOrScopedClient();
   if (adminClient) {
     try {
@@ -195,16 +141,13 @@ export async function getActiveGatewayEngine(): Promise<PaymentEngine> {
         runtimeActiveEngine = data.active_engine;
       }
     } catch {
-      // Fallback cleanly to runtimeActiveEngine if table hasn't been created in Supabase yet
+      // Fallback cleanly if table hasn't been created yet
     }
   }
   return runtimeActiveEngine;
 }
 
-export async function setActiveGatewayEngine(
-  engine: PaymentEngine,
-  adminUserId?: string
-): Promise<PaymentEngine> {
+export async function setActiveGatewayEngine(engine, adminUserId) {
   runtimeActiveEngine = engine;
   const adminClient = getSupabaseAdminClient();
   if (adminClient) {
@@ -239,7 +182,9 @@ export async function getPublicGatewayConfig(baseOrigin = '') {
     localWebhookConfigured,
     supabaseServiceConfigured,
     localWebhookPath: '/api/payments/local-webhook',
-    localWebhookUrl: baseOrigin ? `${baseOrigin}/api/payments/local-webhook` : '/api/payments/local-webhook',
+    localWebhookUrl: baseOrigin
+      ? `${baseOrigin}/api/payments/local-webhook`
+      : '/api/payments/local-webhook',
     paymongoWebhookPath: '/api/payments/paymongo-webhook',
     paymongoWebhookUrl: baseOrigin
       ? `${baseOrigin}/api/payments/paymongo-webhook`
@@ -247,9 +192,9 @@ export async function getPublicGatewayConfig(baseOrigin = '') {
   };
 }
 
-async function allocateUniquePayableAmount(baseAmount: number): Promise<number> {
+async function allocateUniquePayableAmount(baseAmount) {
   pruneExpiredMemoryIntents();
-  const usedCents = new Set<number>();
+  const usedCents = new Set();
   const nowIso = new Date().toISOString();
 
   for (const intent of memoryIntents.values()) {
@@ -278,7 +223,7 @@ async function allocateUniquePayableAmount(baseAmount: number): Promise<number> 
   }
 
   const baseCents = Math.round(roundMoney(baseAmount) * 100);
-  const candidates: number[] = [];
+  const candidates = [];
   for (let offset = 1; offset <= 99; offset += 1) {
     const candidate = baseCents + offset;
     if (!usedCents.has(candidate)) {
@@ -291,7 +236,6 @@ async function allocateUniquePayableAmount(baseAmount: number): Promise<number> 
     return roundMoney(picked / 100);
   }
 
-  // Fallback window offset +₱1.01–₱1.99 if all 99 slots are concurrently occupied
   for (let offset = 101; offset <= 199; offset += 1) {
     const candidate = baseCents + offset;
     if (!usedCents.has(candidate)) {
@@ -302,7 +246,7 @@ async function allocateUniquePayableAmount(baseAmount: number): Promise<number> 
   return roundMoney((baseCents + crypto.randomInt(201, 299)) / 100);
 }
 
-function mapChannelToPaymongoMethods(channel: string): string[] {
+function mapChannelToPaymongoMethods(channel) {
   const normalized = channel.toLowerCase();
   if (normalized.includes('gcash')) return ['gcash', 'qrph'];
   if (normalized.includes('maya')) return ['paymaya', 'qrph'];
@@ -310,14 +254,7 @@ function mapChannelToPaymongoMethods(channel: string): string[] {
   return ['qrph', 'gcash', 'paymaya', 'dob', 'dob_ubp'];
 }
 
-async function createPaymongoCheckoutSession(params: {
-  referenceCode: string;
-  description: string;
-  amountPhp: number;
-  channel: string;
-  successUrl: string;
-  cancelUrl: string;
-}): Promise<{ externalSessionId: string; checkoutUrl: string }> {
+async function createPaymongoCheckoutSession(params) {
   const secretKey = (process.env.PAYMONGO_SECRET_KEY || '').trim();
   if (!secretKey) {
     throw new Error('PAYMONGO_SECRET_KEY is not configured on the server.');
@@ -326,7 +263,7 @@ async function createPaymongoCheckoutSession(params: {
   const authHeader = `Basic ${Buffer.from(`${secretKey}:`).toString('base64')}`;
   const centavos = Math.max(2000, Math.round(params.amountPhp * 100));
 
-  const callApi = async (paymentMethodTypes: string[]) => {
+  const callApi = async (paymentMethodTypes) => {
     const response = await fetch('https://api.paymongo.com/v1/checkout_sessions', {
       method: 'POST',
       headers: {
@@ -362,12 +299,11 @@ async function createPaymongoCheckoutSession(params: {
       }),
     });
 
-    const json: any = await response.json().catch(() => ({}));
+    const json = await response.json().catch(() => ({}));
     return { ok: response.ok, status: response.status, json };
   };
 
   let result = await callApi(mapChannelToPaymongoMethods(params.channel));
-  // PayMongo Individual accounts often allow only ['qrph'] before full DTI/BIR verification
   if (!result.ok) {
     result = await callApi(['qrph']);
   }
@@ -387,7 +323,7 @@ async function createPaymongoCheckoutSession(params: {
   return { externalSessionId: String(sessionId), checkoutUrl };
 }
 
-async function fetchPaymongoSessionPaidState(externalSessionId: string): Promise<boolean> {
+async function fetchPaymongoSessionPaidState(externalSessionId) {
   const secretKey = (process.env.PAYMONGO_SECRET_KEY || '').trim();
   if (!secretKey || !externalSessionId) return false;
   try {
@@ -399,10 +335,10 @@ async function fetchPaymongoSessionPaidState(externalSessionId: string): Promise
       }
     );
     if (!res.ok) return false;
-    const json: any = await res.json().catch(() => null);
+    const json = await res.json().catch(() => null);
     const attrs = json?.data?.attributes;
     const paymentStatus = String(attrs?.payment_intent?.attributes?.status || '').toLowerCase();
-    const payments: any[] = Array.isArray(attrs?.payments) ? attrs.payments : [];
+    const payments = Array.isArray(attrs?.payments) ? attrs.payments : [];
     const hasPaidPayment = payments.some(
       (p) => String(p?.attributes?.status || '').toLowerCase() === 'paid'
     );
@@ -412,7 +348,7 @@ async function fetchPaymongoSessionPaidState(externalSessionId: string): Promise
   }
 }
 
-async function persistIntentToSupabase(intent: PaymentIntentRecord, accessToken?: string): Promise<void> {
+async function persistIntentToSupabase(intent, accessToken) {
   const client = getSupabaseAdminClient() || getSupabaseAnonOrScopedClient(accessToken);
   if (!client) return;
   try {
@@ -446,11 +382,11 @@ async function persistIntentToSupabase(intent: PaymentIntentRecord, accessToken?
       { onConflict: 'id' }
     );
   } catch {
-    // Table may not exist yet in legacy Supabase deployments; memory store still operates cleanly
+    // Table may not exist yet in legacy deployments
   }
 }
 
-async function loadIntentFromSupabase(intentId: string): Promise<PaymentIntentRecord | null> {
+async function loadIntentFromSupabase(intentId) {
   if (!UUID_REGEX.test(intentId)) return null;
   const client = getSupabaseAdminClient();
   if (!client) return null;
@@ -461,7 +397,7 @@ async function loadIntentFromSupabase(intentId: string): Promise<PaymentIntentRe
       .eq('id', intentId)
       .maybeSingle();
     if (!data) return null;
-    const record: PaymentIntentRecord = {
+    return {
       id: data.id,
       referenceCode: data.reference_code,
       readToken: '',
@@ -486,13 +422,12 @@ async function loadIntentFromSupabase(intentId: string): Promise<PaymentIntentRe
       createdAt: data.created_at,
       updatedAt: data.updated_at,
     };
-    return record;
   } catch {
     return null;
   }
 }
 
-async function syncTargetRecordsOnPaid(intent: PaymentIntentRecord): Promise<void> {
+async function syncTargetRecordsOnPaid(intent) {
   const adminClient = getSupabaseAdminClient();
   if (!adminClient) return;
   const nowIso = intent.paidAt || new Date().toISOString();
@@ -561,16 +496,13 @@ async function syncTargetRecordsOnPaid(intent: PaymentIntentRecord): Promise<voi
   }
 }
 
-export async function markPaymentIntentPaid(
-  intentId: string,
-  alertReference?: string
-): Promise<PaymentIntentRecord | null> {
+export async function markPaymentIntentPaid(intentId, alertReference) {
   const existing = memoryIntents.get(intentId) || (await loadIntentFromSupabase(intentId));
   if (!existing) return null;
   if (existing.status === 'paid') return existing;
 
   const nowIso = new Date().toISOString();
-  const updated: PaymentIntentRecord = {
+  const updated = {
     ...existing,
     status: 'paid',
     matchedAlertReference: alertReference || existing.matchedAlertReference,
@@ -583,7 +515,7 @@ export async function markPaymentIntentPaid(
   return updated;
 }
 
-export function sanitizeIntentForClient(intent: PaymentIntentRecord, includeReadToken = false) {
+export function sanitizeIntentForClient(intent, includeReadToken = false) {
   return {
     id: intent.id,
     referenceCode: intent.referenceCode,
@@ -606,25 +538,13 @@ export function sanitizeIntentForClient(intent: PaymentIntentRecord, includeRead
   };
 }
 
-export async function createPaymentSession(params: {
-  targetType: PaymentTargetType;
-  channel: string;
-  channelLabel?: string;
-  planId?: 'pro';
-  storeId?: string;
-  orderId?: string;
-  subscriptionId?: string;
-  baseAmount?: number;
-  currency?: string;
-  originUrl?: string;
-  accessToken?: string;
-}): Promise<{ intent: PaymentIntentRecord; error?: string; statusCode?: number }> {
+export async function createPaymentSession(params) {
   const caller = params.accessToken ? await verifySupabaseCaller(params.accessToken) : null;
   const activeEngine = await getActiveGatewayEngine();
 
   let authoritativeAmount = 0;
   let description = 'mystore Payment';
-  let planId: 'pro' | undefined;
+  let planId;
 
   if (params.targetType === 'subscription') {
     planId = 'pro';
@@ -634,7 +554,7 @@ export async function createPaymentSession(params: {
     const rawAmount = Number(params.baseAmount);
     if (!Number.isFinite(rawAmount) || rawAmount <= 0 || rawAmount > 10_000_000) {
       return {
-        intent: null as unknown as PaymentIntentRecord,
+        intent: null,
         error: 'Invalid order payment amount.',
         statusCode: 400,
       };
@@ -651,8 +571,8 @@ export async function createPaymentSession(params: {
   const readToken = crypto.randomBytes(24).toString('hex');
 
   let uniquePayableAmount = authoritativeAmount;
-  let externalSessionId: string | undefined;
-  let checkoutUrl: string | undefined;
+  let externalSessionId;
+  let checkoutUrl;
 
   if (activeEngine === 'auto_match') {
     uniquePayableAmount = await allocateUniquePayableAmount(authoritativeAmount);
@@ -674,16 +594,16 @@ export async function createPaymentSession(params: {
       });
       externalSessionId = pm.externalSessionId;
       checkoutUrl = pm.checkoutUrl;
-    } catch (err: any) {
+    } catch (err) {
       return {
-        intent: null as unknown as PaymentIntentRecord,
+        intent: null,
         error: err?.message || 'PayMongo checkout creation failed.',
         statusCode: 502,
       };
     }
   }
 
-  const record: PaymentIntentRecord = {
+  const record = {
     id,
     referenceCode,
     readToken,
@@ -713,11 +633,7 @@ export async function createPaymentSession(params: {
   return { intent: record };
 }
 
-export async function getPaymentSessionStatus(params: {
-  intentId: string;
-  readToken?: string;
-  accessToken?: string;
-}): Promise<{ intent?: PaymentIntentRecord; error?: string; statusCode?: number }> {
+export async function getPaymentSessionStatus(params) {
   pruneExpiredMemoryIntents();
   let intent = memoryIntents.get(params.intentId) || (await loadIntentFromSupabase(params.intentId));
   if (!intent) {
@@ -753,17 +669,11 @@ export async function getPaymentSessionStatus(params: {
   return { intent };
 }
 
-export function parseLocalCreditAlert(payload: Record<string, unknown>): {
-  amount?: number;
-  channel?: string;
-  reference?: string;
-  sender?: string;
-  rawText: string;
-} {
+export function parseLocalCreditAlert(payload) {
   const rawText = String(
     payload.text || payload.message || payload.body || payload.notification || ''
   ).trim();
-  let amount: number | undefined;
+  let amount;
 
   if (payload.amount !== undefined && payload.amount !== null && payload.amount !== '') {
     const cleaned = String(payload.amount).replace(/[₱,\s]/g, '');
@@ -814,19 +724,7 @@ export function parseLocalCreditAlert(payload: Record<string, unknown>): {
   return { amount, channel, reference, sender, rawText };
 }
 
-export async function processLocalWebhookAlert(params: {
-  payload: Record<string, unknown>;
-  providedSecret?: string;
-  skipSecretCheck?: boolean;
-}): Promise<{
-  ok: boolean;
-  statusCode: number;
-  matched?: boolean;
-  duplicate?: boolean;
-  amount?: number;
-  intent?: PaymentIntentRecord;
-  error?: string;
-}> {
+export async function processLocalWebhookAlert(params) {
   if (!params.skipSecretCheck) {
     const configuredSecret = (process.env.LOCAL_PAYMENT_WEBHOOK_SECRET || '').trim();
     if (!configuredSecret) {
@@ -870,7 +768,7 @@ export async function processLocalWebhookAlert(params: {
   const targetCents = Math.round(parsed.amount * 100);
   const nowIso = new Date().toISOString();
 
-  let matchedIntent: PaymentIntentRecord | undefined;
+  let matchedIntent;
   for (const intent of memoryIntents.values()) {
     if (
       intent.status === 'awaiting_payment' &&
@@ -897,19 +795,19 @@ export async function processLocalWebhookAlert(params: {
         matchedIntent = (await loadIntentFromSupabase(row.id)) || undefined;
       }
     } catch {
-      // Ignore if payment_intents table doesn't exist yet
+      // Ignore if table doesn't exist yet
     }
   }
 
   const alertRef =
     parsed.reference || `ALERT-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
 
-  let confirmedIntent: PaymentIntentRecord | undefined;
+  let confirmedIntent;
   if (matchedIntent) {
     confirmedIntent = (await markPaymentIntentPaid(matchedIntent.id, alertRef)) || undefined;
   }
 
-  const alertRecord: IncomingAlertRecord = {
+  const alertRecord = {
     id: crypto.randomUUID(),
     idempotencyKey,
     provider: params.skipSecretCheck ? 'admin_test_alert' : 'local_forwarder',
@@ -952,11 +850,11 @@ export async function processLocalWebhookAlert(params: {
   };
 }
 
-export function verifyPaymongoSignature(rawBody: string, signatureHeader?: string): boolean {
+export function verifyPaymongoSignature(rawBody, signatureHeader) {
   const webhookSecret = (process.env.PAYMONGO_WEBHOOK_SECRET || '').trim();
   if (!webhookSecret || !signatureHeader) return false;
 
-  const parts = new Map<string, string>();
+  const parts = new Map();
   for (const segment of signatureHeader.split(',')) {
     const [k, v] = segment.split('=');
     if (k && v) parts.set(k.trim(), v.trim());
@@ -979,15 +877,12 @@ export function verifyPaymongoSignature(rawBody: string, signatureHeader?: strin
   return constantTimeEquals(candidateSig, expected);
 }
 
-export async function processPaymongoWebhook(params: {
-  rawBody: string;
-  signatureHeader?: string;
-}): Promise<{ ok: boolean; statusCode: number; error?: string }> {
+export async function processPaymongoWebhook(params) {
   if (!verifyPaymongoSignature(params.rawBody, params.signatureHeader)) {
     return { ok: false, statusCode: 401, error: 'Invalid PayMongo webhook signature.' };
   }
 
-  let event: any;
+  let event;
   try {
     event = JSON.parse(params.rawBody);
   } catch {
@@ -1002,11 +897,8 @@ export async function processPaymongoWebhook(params: {
     resourceData?.attributes?.metadata?.checkout_session_id;
   const referenceCode = resourceData?.attributes?.reference_number;
 
-  if (
-    eventType === 'checkout_session.payment.paid' ||
-    eventType === 'payment.paid'
-  ) {
-    let matchedId: string | undefined;
+  if (eventType === 'checkout_session.payment.paid' || eventType === 'payment.paid') {
+    let matchedId;
     for (const intent of memoryIntents.values()) {
       if (
         (sessionId && intent.externalSessionId === sessionId) ||
@@ -1035,13 +927,86 @@ export async function processPaymongoWebhook(params: {
   return { ok: true, statusCode: 200 };
 }
 
-export function listActiveIntentsForAdmin() {
+export async function listActiveIntentsForAdmin() {
   pruneExpiredMemoryIntents();
+
+  const mergedIntents = new Map();
+  for (const item of memoryIntents.values()) {
+    mergedIntents.set(item.id, sanitizeIntentForClient(item, false));
+  }
+
+  let recentAlerts = memoryRecentAlerts.slice(0, 15);
+
+  const adminClient = getSupabaseAdminClient();
+  if (adminClient) {
+    try {
+      const [{ data: dbIntents }, { data: dbAlerts }] = await Promise.all([
+        adminClient
+          .from('payment_intents')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .limit(20),
+        adminClient
+          .from('incoming_payment_alerts')
+          .select('*')
+          .order('received_at', { ascending: false })
+          .limit(15),
+      ]);
+
+      for (const row of dbIntents || []) {
+        if (!mergedIntents.has(row.id)) {
+          mergedIntents.set(row.id, {
+            id: row.id,
+            referenceCode: row.reference_code,
+            targetType: row.target_type,
+            planId: row.plan_id || undefined,
+            storeId: row.store_id || undefined,
+            channel: row.channel,
+            channelLabel: row.channel,
+            provider: row.provider,
+            currency: row.currency || 'PHP',
+            baseAmount: Number(row.base_amount),
+            uniquePayableAmount: Number(row.unique_payable_amount),
+            checkoutUrl: row.checkout_url || undefined,
+            status: row.status,
+            matchedAlertReference: row.matched_alert_reference || undefined,
+            paidAt: row.paid_at || undefined,
+            expiresAt: row.expires_at,
+            createdAt: row.created_at,
+          });
+        }
+      }
+
+      if (Array.isArray(dbAlerts) && dbAlerts.length > 0) {
+        const seenAlertIds = new Set(recentAlerts.map((a) => a.id));
+        const mergedAlerts = [...recentAlerts];
+        for (const row of dbAlerts) {
+          if (!seenAlertIds.has(row.id)) {
+            mergedAlerts.push({
+              id: row.id,
+              provider: row.provider,
+              channel: row.channel || undefined,
+              amount: Number(row.amount),
+              senderName: row.sender_name || undefined,
+              externalReference: row.external_reference || undefined,
+              matchedIntentId: row.matched_intent_id || undefined,
+              receivedAt: row.received_at,
+            });
+          }
+        }
+        recentAlerts = mergedAlerts
+          .sort((a, b) => new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime())
+          .slice(0, 15);
+      }
+    } catch {
+      // Fallback cleanly to memory if tables aren't migrated yet
+    }
+  }
+
   return {
-    intents: Array.from(memoryIntents.values())
+    intents: Array.from(mergedIntents.values())
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .slice(0, 20)
-      .map((item) => sanitizeIntentForClient(item, false)),
-    recentAlerts: memoryRecentAlerts.slice(0, 15),
+      .slice(0, 20),
+    recentAlerts,
   };
 }

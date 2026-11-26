@@ -11,11 +11,28 @@ import {
   sanitizeIntentForClient,
   setActiveGatewayEngine,
   verifySupabaseCaller,
-} from './paymentsService.ts';
-import type { PaymentEngine } from './paymentsService.ts';
+} from './paymentsService.js';
 
 export function createPaymentsApiApp() {
   const app = express();
+
+  // Handle platforms like Vercel that may pre-parse req.body before Express runs
+  app.use((req, _res, next) => {
+    if (req.body !== undefined && !Buffer.isBuffer(req.body)) {
+      if (typeof req.body === 'string') {
+        const trimmed = req.body.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          try {
+            req.body = JSON.parse(trimmed);
+          } catch {
+            // Leave raw string intact if not valid JSON
+          }
+        }
+      }
+      req._body = true;
+    }
+    next();
+  });
 
   // Capture raw bytes specifically for PayMongo HMAC webhook signature verification
   app.post(
@@ -60,7 +77,8 @@ export function createPaymentsApiApp() {
     try {
       const body = req.body && typeof req.body === 'object' ? req.body : {};
       const targetType = body.targetType === 'subscription' ? 'subscription' : 'store_order';
-      const channel = typeof body.channel === 'string' && body.channel.trim() ? body.channel.trim() : 'qrph';
+      const channel =
+        typeof body.channel === 'string' && body.channel.trim() ? body.channel.trim() : 'qrph';
       const channelLabel =
         typeof body.channelLabel === 'string' && body.channelLabel.trim()
           ? body.channelLabel.trim()
@@ -78,14 +96,17 @@ export function createPaymentsApiApp() {
         storeId: typeof body.storeId === 'string' ? body.storeId : undefined,
         orderId: typeof body.orderId === 'string' ? body.orderId : undefined,
         subscriptionId: typeof body.subscriptionId === 'string' ? body.subscriptionId : undefined,
-        baseAmount: typeof body.baseAmount === 'number' ? body.baseAmount : Number(body.baseAmount),
+        baseAmount:
+          typeof body.baseAmount === 'number' ? body.baseAmount : Number(body.baseAmount),
         currency: typeof body.currency === 'string' ? body.currency : 'PHP',
         originUrl,
         accessToken,
       });
 
       if (created.error || !created.intent) {
-        res.status(created.statusCode || 400).json({ error: created.error || 'Could not create payment session.' });
+        res
+          .status(created.statusCode || 400)
+          .json({ error: created.error || 'Could not create payment session.' });
         return;
       }
 
@@ -175,7 +196,7 @@ export function createPaymentsApiApp() {
       }
 
       const caller = accessToken ? await verifySupabaseCaller(accessToken) : null;
-      const engine: PaymentEngine = await setActiveGatewayEngine(rawEngine, caller?.userId);
+      const engine = await setActiveGatewayEngine(rawEngine, caller?.userId);
       const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
       const host = req.headers['x-forwarded-host'] || req.headers.host || '';
       const config = await getPublicGatewayConfig(host ? `${proto}://${host}` : '');
@@ -193,7 +214,8 @@ export function createPaymentsApiApp() {
         res.status(403).json({ error: 'Admin privileges required.' });
         return;
       }
-      res.status(200).json(listActiveIntentsForAdmin());
+      const activity = await listActiveIntentsForAdmin();
+      res.status(200).json(activity);
     } catch {
       res.status(500).json({ error: 'Failed to load gateway activity.' });
     }

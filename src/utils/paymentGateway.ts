@@ -63,12 +63,23 @@ async function getAccessToken(): Promise<string | undefined> {
   }
 }
 
+async function parseResponseJson<T = Record<string, unknown>>(res: Response): Promise<T | null> {
+  try {
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchPaymentGatewayConfig(): Promise<PaymentGatewayPublicConfig> {
   const res = await fetch('/api/payments/config');
-  if (!res.ok) {
-    throw new Error('Unable to load payment gateway configuration.');
+  const data = await parseResponseJson<PaymentGatewayPublicConfig & { error?: string }>(res);
+  if (!res.ok || !data || typeof data.engine !== 'string') {
+    throw new Error(
+      data?.error || `Gateway endpoint unavailable (HTTP ${res.status}).`
+    );
   }
-  return res.json();
+  return data;
 }
 
 export async function createPaymentSessionIntent(params: {
@@ -91,11 +102,13 @@ export async function createPaymentSessionIntent(params: {
     headers,
     body: JSON.stringify(params),
   });
-  const data = await res.json().catch(() => ({}));
+  const data = await parseResponseJson<{ session?: PaymentSessionIntent; error?: string }>(res);
   if (!res.ok || !data?.session) {
-    throw new Error(data?.error || 'Could not initialize payment session.');
+    throw new Error(
+      data?.error || `Could not initialize payment session (HTTP ${res.status}).`
+    );
   }
-  return data.session as PaymentSessionIntent;
+  return data.session;
 }
 
 export async function pollPaymentSessionIntent(
@@ -111,11 +124,11 @@ export async function pollPaymentSessionIntent(
   const res = await fetch(`/api/payments/sessions/${encodeURIComponent(sessionId)}${qs}`, {
     headers,
   });
-  const data = await res.json().catch(() => ({}));
+  const data = await parseResponseJson<{ session?: PaymentSessionIntent; error?: string }>(res);
   if (!res.ok || !data?.session) {
-    throw new Error(data?.error || 'Unable to check payment status.');
+    throw new Error(data?.error || `Unable to check payment status (HTTP ${res.status}).`);
   }
-  return data.session as PaymentSessionIntent;
+  return data.session;
 }
 
 export async function setAdminGatewayEngine(
@@ -130,9 +143,15 @@ export async function setAdminGatewayEngine(
     headers,
     body: JSON.stringify({ engine }),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data?.error || 'Could not update payment gateway engine.');
+  const data = await parseResponseJson<{
+    engine: PaymentGatewayEngine;
+    config: PaymentGatewayPublicConfig;
+    error?: string;
+  }>(res);
+  if (!res.ok || !data) {
+    throw new Error(
+      data?.error || `Could not update payment gateway engine (HTTP ${res.status}).`
+    );
   }
   return data;
 }
@@ -143,11 +162,11 @@ export async function fetchAdminGatewayActivity(): Promise<AdminGatewayActivity>
   if (token) headers.Authorization = `Bearer ${token}`;
 
   const res = await fetch('/api/payments/admin/intents', { headers });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data?.error || 'Could not fetch gateway activity.');
+  const data = await parseResponseJson<AdminGatewayActivity & { error?: string }>(res);
+  if (!res.ok || !data || !Array.isArray(data.intents)) {
+    throw new Error(data?.error || `Could not fetch gateway activity (HTTP ${res.status}).`);
   }
-  return data as AdminGatewayActivity;
+  return data;
 }
 
 export async function sendAdminTestWebhookAlert(payload: {
@@ -171,9 +190,19 @@ export async function sendAdminTestWebhookAlert(payload: {
     headers,
     body: JSON.stringify(payload),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data?.error || 'Test payment alert failed.');
+  const data = await parseResponseJson<{
+    ok: boolean;
+    matched?: boolean;
+    duplicate?: boolean;
+    amount?: number;
+    session?: PaymentSessionIntent;
+    error?: string;
+  }>(res);
+  if (!res.ok || !data) {
+    throw new Error(
+      data?.error ||
+        `Payment alert API unavailable (HTTP ${res.status}). Push latest code & verify server env.`
+    );
   }
   return data;
 }
