@@ -39,9 +39,26 @@ export function isSupabaseServerAuthConfigured() {
   return Boolean(activeUrl.startsWith('https://') && (serviceKey || anonKey));
 }
 
+function isLikelyServiceRoleKey(key) {
+  if (!key) return false;
+  if (key.startsWith('sb_publishable_')) return false;
+  const parts = key.split('.');
+  if (parts.length === 3) {
+    try {
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+      if (payload?.role && payload.role !== 'service_role') {
+        return false;
+      }
+    } catch {
+      // Ignore malformed JWT segment
+    }
+  }
+  return true;
+}
+
 function getSupabaseAdminClient() {
   const { url, serviceKey } = getSupabaseServerConfig();
-  if (!url.startsWith('https://') || !serviceKey) return null;
+  if (!url.startsWith('https://') || !isLikelyServiceRoleKey(serviceKey)) return null;
   return createClient(url, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
@@ -50,12 +67,13 @@ function getSupabaseAdminClient() {
 function getSupabaseAnonOrScopedClient(accessToken, overrideUrl) {
   const { url, serviceKey, anonKey } = getSupabaseServerConfig();
   const targetUrl = overrideUrl || url;
-  const key = (!overrideUrl ? serviceKey : '') || anonKey;
+  const validServiceKey = isLikelyServiceRoleKey(serviceKey) ? serviceKey : '';
+  const key = (!overrideUrl ? validServiceKey : '') || anonKey || serviceKey;
   if (!targetUrl.startsWith('https://') || !key) return null;
   return createClient(targetUrl, key, {
     auth: { persistSession: false, autoRefreshToken: false },
     global:
-      accessToken && (Boolean(overrideUrl) || !serviceKey)
+      accessToken && (Boolean(overrideUrl) || !validServiceKey)
         ? { headers: { Authorization: `Bearer ${accessToken}` } }
         : undefined,
   });
@@ -87,36 +105,39 @@ export async function verifySupabaseCaller(accessToken) {
 
   const candidateClients = [];
   const adminClient = getSupabaseAdminClient();
-  if (adminClient) candidateClients.push({ client: adminClient, isService: true });
-  if (anonKey && url.startsWith('https://')) {
-    candidateClients.push({
-      client: createClient(url, anonKey, {
-        auth: { persistSession: false, autoRefreshToken: false },
-        global: { headers: { Authorization: `Bearer ${accessToken}` } },
-      }),
-      isService: false,
-    });
-  }
-  if (anonKey && viteUrl.startsWith('https://') && viteUrl !== url) {
-    candidateClients.push({
-      client: createClient(viteUrl, anonKey, {
-        auth: { persistSession: false, autoRefreshToken: false },
-        global: { headers: { Authorization: `Bearer ${accessToken}` } },
-      }),
-      isService: false,
-    });
-  }
+  const { serviceKey: rawServiceKey } = getSupabaseServerConfig();
+  const fallbackKey = anonKey || rawServiceKey;
+
+  const scopedPrimaryClient =
+    fallbackKey && url.startsWith('https://')
+      ? createClient(url, fallbackKey, {
+          auth: { persistSession: false, autoRefreshToken: false },
+          global: { headers: { Authorization: `Bearer ${accessToken}` } },
+        })
+      : null;
+
+  const scopedViteClient =
+    fallbackKey && viteUrl.startsWith('https://') && viteUrl !== url
+      ? createClient(viteUrl, fallbackKey, {
+          auth: { persistSession: false, autoRefreshToken: false },
+          global: { headers: { Authorization: `Bearer ${accessToken}` } },
+        })
+      : null;
+
+  if (adminClient) candidateClients.push(adminClient);
+  if (scopedPrimaryClient) candidateClients.push(scopedPrimaryClient);
+  if (scopedViteClient) candidateClients.push(scopedViteClient);
 
   let verifiedUser = null;
   let verifiedClient = null;
   let lastAuthError = '';
 
-  for (const entry of candidateClients) {
+  for (const candidate of candidateClients) {
     try {
-      const { data, error } = await entry.client.auth.getUser(accessToken);
+      const { data, error } = await candidate.auth.getUser(accessToken);
       if (!error && data?.user?.id) {
         verifiedUser = data.user;
-        verifiedClient = entry.client;
+        verifiedClient = candidate;
         break;
       }
       if (error?.message) lastAuthError = error.message;
@@ -135,27 +156,45 @@ export async function verifySupabaseCaller(accessToken) {
   }
 
   let userRow = null;
-  const lookupClients = [adminClient, verifiedClient].filter(Boolean);
+  const lookupClients = Array.from(
+    new Set([adminClient, scopedPrimaryClient, scopedViteClient, verifiedClient].filter(Boolean))
+  );
   for (const dbClient of lookupClients) {
     try {
       const { data, error } = await dbClient
         .from('users')
-        .select('role_id, email')
+        .select('*')
         .eq('id', verifiedUser.id)
         .maybeSingle();
       if (!error && data) {
         userRow = data;
         break;
       }
+      if (verifiedUser.email) {
+        const { data: byEmail, error: emailErr } = await dbClient
+          .from('users')
+          .select('*')
+          .eq('email', verifiedUser.email.toLowerCase())
+          .maybeSingle();
+        if (!emailErr && byEmail) {
+          userRow = byEmail;
+          break;
+        }
+      }
     } catch {
       // Try next client
     }
   }
 
-  const parsedRoleId =
-    userRow?.role_id !== undefined && userRow?.role_id !== null
-      ? Number(userRow.role_id)
-      : undefined;
+  let parsedRoleId;
+  if (userRow?.role_id !== undefined && userRow?.role_id !== null) {
+    parsedRoleId = Number(userRow.role_id);
+  } else if (typeof userRow?.role === 'string') {
+    const normalizedRole = userRow.role.trim().toLowerCase();
+    if (normalizedRole === 'admin') parsedRoleId = 1;
+    else if (normalizedRole === 'seller') parsedRoleId = 2;
+    else if (normalizedRole === 'buyer') parsedRoleId = 3;
+  }
 
   return {
     authenticated: true,
@@ -268,9 +307,14 @@ export async function setActiveGatewayEngine(engine, adminUserId) {
 
 export async function getPublicGatewayConfig(baseOrigin = '') {
   const engine = await getActiveGatewayEngine();
+  const { serviceKey } = getSupabaseServerConfig();
   const paymongoConfigured = Boolean((process.env.PAYMONGO_SECRET_KEY || '').trim());
   const localWebhookConfigured = Boolean((process.env.LOCAL_PAYMENT_WEBHOOK_SECRET || '').trim());
   const supabaseServiceConfigured = Boolean(getSupabaseAdminClient());
+  const supabaseKeyWarning =
+    serviceKey && !isLikelyServiceRoleKey(serviceKey)
+      ? 'Anon/Publishable key detected in SUPABASE_SERVICE_ROLE_KEY slot — use the Secret/service_role key.'
+      : undefined;
 
   return {
     engine,
@@ -279,6 +323,7 @@ export async function getPublicGatewayConfig(baseOrigin = '') {
     paymongoConfigured,
     localWebhookConfigured,
     supabaseServiceConfigured,
+    ...(supabaseKeyWarning ? { supabaseKeyWarning } : {}),
     localWebhookPath: '/api/payments/local-webhook',
     localWebhookUrl: baseOrigin
       ? `${baseOrigin}/api/payments/local-webhook`

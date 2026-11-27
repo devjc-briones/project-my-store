@@ -947,9 +947,16 @@ export function AdminPaymentSettingsTab({
                           ? 'Checking...'
                           : gatewayConfig?.supabaseServiceConfigured
                             ? 'Connected'
-                            : 'Memory Fallback'}
+                            : gatewayConfig?.supabaseKeyWarning
+                              ? 'Wrong Key Type'
+                              : 'Memory Fallback'}
                       </span>
                     </div>
+                    {gatewayConfig?.supabaseKeyWarning && (
+                      <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5 leading-snug">
+                        {gatewayConfig.supabaseKeyWarning}
+                      </p>
+                    )}
                   </div>
                 )}
               </div>

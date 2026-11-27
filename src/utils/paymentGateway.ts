@@ -10,6 +10,7 @@ export interface PaymentGatewayPublicConfig {
   paymongoConfigured: boolean;
   localWebhookConfigured: boolean;
   supabaseServiceConfigured: boolean;
+  supabaseKeyWarning?: string;
   localWebhookPath: string;
   localWebhookUrl: string;
   paymongoWebhookPath: string;
