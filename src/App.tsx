@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useEffect } from 'react';
 import { StoreProvider, useStore } from './context/StoreContext';
 import { Roles } from './types/schema';
 import { LandingPage } from './pages/LandingPage';
@@ -17,7 +18,17 @@ import { PageLoader } from './components/common/PageLoader';
 import { ToastContainer } from './components/common/ToastContainer';
 
 function AppRouter() {
-  const { route, state, isAuthChecking } = useStore();
+  const { route, state, isAuthChecking, navigate } = useStore();
+
+  useEffect(() => {
+    if ((route.name === 'landing' || route.name === 'login') && state.currentUser) {
+      if (state.currentUser.role === Roles.Admin) {
+        navigate({ name: 'admin' }, { replace: true });
+      } else if (state.currentUser.role === Roles.Seller) {
+        navigate({ name: 'dashboard' }, { replace: true });
+      }
+    }
+  }, [route.name, state.currentUser, navigate]);
 
   if (route.name === 'storefront') {
     return <PublicStorefrontPage />;
@@ -74,6 +85,16 @@ function AppRouter() {
       return <StoreCustomizerPage />;
     }
     return <StoreProductsManagerPage />;
+  }
+
+  if (state.currentUser?.role === Roles.Admin) {
+    return <AdminPage />;
+  }
+  if (state.currentUser?.role === Roles.Seller) {
+    return <DashboardPage />;
+  }
+  if (isAuthChecking) {
+    return <PageLoader label="Loading..." />;
   }
 
   return <LandingPage />;
