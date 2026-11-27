@@ -3,6 +3,7 @@ import {
   checkAdminAccess,
   createPaymentSession,
   extractBearerToken,
+  getPaymentSessionByReference,
   getPaymentSessionStatus,
   getPublicGatewayConfig,
   listActiveIntentsForAdmin,
@@ -115,6 +116,27 @@ export function createPaymentsApiApp() {
       });
     } catch {
       res.status(500).json({ error: 'Failed to create payment session.' });
+    }
+  });
+
+  app.get('/api/payments/sessions/by-ref/:referenceCode', async (req, res) => {
+    try {
+      const accessToken = extractBearerToken(req.headers.authorization);
+      const result = await getPaymentSessionByReference({
+        referenceCode: req.params.referenceCode,
+        accessToken,
+      });
+
+      if (result.error || !result.intent) {
+        res.status(result.statusCode || 404).json({ error: result.error || 'Session not found.' });
+        return;
+      }
+
+      res.status(200).json({
+        session: sanitizeIntentForClient(result.intent, true),
+      });
+    } catch {
+      res.status(500).json({ error: 'Unable to resume payment session.' });
     }
   });
 

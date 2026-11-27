@@ -812,6 +812,89 @@ export async function getPaymentSessionStatus(params) {
   return { intent };
 }
 
+export async function getPaymentSessionByReference(params) {
+  pruneExpiredMemoryIntents();
+  const cleanRef = String(params.referenceCode || '').trim().toUpperCase();
+  if (!cleanRef) {
+    return { error: 'Payment reference is required.', statusCode: 400 };
+  }
+
+  let intent = null;
+  for (const item of memoryIntents.values()) {
+    if (String(item.referenceCode || '').toUpperCase() === cleanRef) {
+      intent = item;
+      break;
+    }
+  }
+
+  if (!intent) {
+    const client = getSupabaseAdminClient() || getSupabaseAnonOrScopedClient(params.accessToken);
+    if (client) {
+      try {
+        const { data } = await client
+          .from('payment_intents')
+          .select('*')
+          .eq('reference_code', cleanRef)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (data) {
+          intent = {
+            id: data.id,
+            referenceCode: data.reference_code,
+            readToken: '',
+            targetType: data.target_type,
+            userId: data.user_id || undefined,
+            storeId: data.store_id || undefined,
+            orderId: data.order_id || undefined,
+            subscriptionId: data.subscription_id || undefined,
+            planId: data.plan_id || undefined,
+            channel: data.channel,
+            channelLabel: data.channel,
+            provider: data.provider,
+            currency: data.currency || 'PHP',
+            baseAmount: Number(data.base_amount),
+            uniquePayableAmount: Number(data.unique_payable_amount),
+            externalSessionId: data.external_session_id || undefined,
+            checkoutUrl: data.checkout_url || undefined,
+            status: data.status,
+            matchedAlertReference: data.matched_alert_reference || undefined,
+            paidAt: data.paid_at || undefined,
+            expiresAt: data.expires_at,
+            createdAt: data.created_at,
+            updatedAt: data.updated_at,
+          };
+        }
+      } catch {
+        // Ignore if table not available
+      }
+    }
+  }
+
+  if (!intent) {
+    return { error: 'Payment session not found for this reference.', statusCode: 404 };
+  }
+
+  if (isSupabaseServerAuthConfigured()) {
+    const caller = params.accessToken ? await verifySupabaseCaller(params.accessToken) : null;
+    const allowed = Boolean(
+      caller?.authenticated &&
+        (caller.roleId === 1 || !intent.userId || caller.userId === intent.userId)
+    );
+    if (!allowed) {
+      return { error: 'Unauthorized payment session access.', statusCode: 403 };
+    }
+  }
+
+  if (intent.status === 'awaiting_payment' && new Date(intent.expiresAt).getTime() <= Date.now()) {
+    intent = { ...intent, status: 'expired', updatedAt: new Date().toISOString() };
+    memoryIntents.set(intent.id, intent);
+    await persistIntentToSupabase(intent);
+  }
+
+  return { intent };
+}
+
 export function parseLocalCreditAlert(payload) {
   const rawText = String(
     payload.text || payload.message || payload.body || payload.notification || ''

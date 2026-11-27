@@ -28,6 +28,7 @@ import {
   PaymentSessionIntent,
   createPaymentSessionIntent,
   fetchPaymentGatewayConfig,
+  fetchPaymentSessionByReference,
   isAllowedPaymongoRedirect,
   pollPaymentSessionIntent,
 } from '../utils/paymentGateway';
@@ -167,8 +168,35 @@ export function UpgradePlanPage() {
   // Zero-receipt live payment session state
   const [paymentSession, setPaymentSession] = useState<PaymentSessionIntent | null>(null);
   const [isCreatingSession, setIsCreatingSession] = useState(false);
+  const [isResumingSession, setIsResumingSession] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+
+  const pendingStorageKey = user?.id ? `mystore_pending_sub_session:${user.id}` : null;
+
+  const readCachedSubscriptionSession = (): PaymentSessionIntent | null => {
+    if (!pendingStorageKey || typeof window === 'undefined') return null;
+    try {
+      const raw = window.localStorage.getItem(pendingStorageKey);
+      if (!raw) return null;
+      return JSON.parse(raw) as PaymentSessionIntent;
+    } catch {
+      return null;
+    }
+  };
+
+  const writeCachedSubscriptionSession = (session: PaymentSessionIntent | null) => {
+    if (!pendingStorageKey || typeof window === 'undefined') return;
+    try {
+      if (!session || session.status === 'paid') {
+        window.localStorage.removeItem(pendingStorageKey);
+      } else {
+        window.localStorage.setItem(pendingStorageKey, JSON.stringify(session));
+      }
+    } catch {
+      // Ignore storage quota restrictions
+    }
+  };
 
   // Confirmation banner state
   const [completedUpgrade, setCompletedUpgrade] = useState<{
@@ -292,6 +320,7 @@ export function UpgradePlanPage() {
         );
 
         if (latest.status === 'paid') {
+          writeCachedSubscriptionSession(null);
           await confirmGatewaySubscription({
             referenceId: latest.referenceCode,
             planId: 'pro',
@@ -333,10 +362,93 @@ export function UpgradePlanPage() {
     selectedPlan.priceLabel,
   ]);
 
+  const handleResumePendingPayment = async () => {
+    if (!pendingSubscriptionTx) return;
+    const targetPlanId: PlanId = pendingSubscriptionTx.planId || 'pro';
+    setSelectedPlanId(targetPlanId);
+    setCompletedUpgrade(null);
+    setSessionError(null);
+    setCopiedNumber(false);
+    setCopiedExactAmount(false);
+
+    const matchedChannel =
+      availableChannels.find(
+        (c) =>
+          c.id === pendingSubscriptionTx.paymentMethod.toLowerCase() ||
+          c.label.toLowerCase() === pendingSubscriptionTx.paymentMethod.toLowerCase()
+      ) ?? availableChannels[0];
+    if (matchedChannel) {
+      setSelectedChannelId(matchedChannel.id);
+    }
+
+    setPaymentModalOpen(true);
+
+    // If current state already holds the awaiting session, keep it immediately
+    if (
+      paymentSession &&
+      paymentSession.referenceCode === pendingSubscriptionTx.referenceId &&
+      paymentSession.status === 'awaiting_payment'
+    ) {
+      return;
+    }
+
+    const cached = readCachedSubscriptionSession();
+    if (cached && cached.referenceCode === pendingSubscriptionTx.referenceId) {
+      setPaymentSession(cached);
+      const cachedChannel = availableChannels.find((c) => c.id === cached.channel);
+      if (cachedChannel) setSelectedChannelId(cachedChannel.id);
+    }
+
+    setIsResumingSession(true);
+    try {
+      let latest: PaymentSessionIntent | null = null;
+      if (cached && cached.referenceCode === pendingSubscriptionTx.referenceId) {
+        latest = await pollPaymentSessionIntent(cached.id, cached.readToken).catch(() => null);
+        if (latest) {
+          latest = { ...latest, readToken: cached.readToken };
+        }
+      }
+      if (!latest) {
+        latest = await fetchPaymentSessionByReference(pendingSubscriptionTx.referenceId);
+      }
+      setPaymentSession(latest);
+      writeCachedSubscriptionSession(latest);
+      const sessionChannel = availableChannels.find((c) => c.id === latest.channel);
+      if (sessionChannel) setSelectedChannelId(sessionChannel.id);
+
+      if (latest.status === 'paid') {
+        writeCachedSubscriptionSession(null);
+        await confirmGatewaySubscription({
+          referenceId: latest.referenceCode,
+          planId: 'pro',
+          amount: latest.baseAmount,
+          paymentMethod:
+            latest.channelLabel || pendingSubscriptionTx.paymentMethod || 'Local Payment',
+        });
+        setCompletedUpgrade({
+          planName: 'Pro',
+          priceLabel: `₱${latest.baseAmount} / month`,
+          paymentLabel:
+            latest.channelLabel || pendingSubscriptionTx.paymentMethod || 'Local Payment',
+          referenceId: latest.referenceCode,
+        });
+      }
+    } catch {
+      if (!cached || cached.referenceCode !== pendingSubscriptionTx.referenceId) {
+        setPaymentSession(null);
+      }
+    } finally {
+      setIsResumingSession(false);
+    }
+  };
+
   const handleSelectPlan = (planId: PlanId) => {
     const isPayingDueCurrentPlan = planId === currentPlanId && isPlanDue;
     if (planId === currentPlanId && !isPayingDueCurrentPlan) return;
-    if (pendingSubscriptionTx && planId === pendingSubscriptionTx.planId) return;
+    if (pendingSubscriptionTx && planId === pendingSubscriptionTx.planId) {
+      void handleResumePendingPayment();
+      return;
+    }
 
     const targetPlan = PLATFORM_PLANS.find((p) => p.id === planId);
     if (!targetPlan) return;
@@ -455,6 +567,7 @@ export function UpgradePlanPage() {
         currency: 'PHP',
       });
       setPaymentSession(session);
+      writeCachedSubscriptionSession(session);
       setNowMs(Date.now());
 
       // Record pending subscription transaction tied to this exact reference code (no receipt needed)
@@ -678,18 +791,28 @@ export function UpgradePlanPage() {
                       {pendingSubscriptionTx.referenceId}
                     </span>{' '}
                     · ₱{pendingSubscriptionTx.amount} / month via{' '}
-                    {pendingSubscriptionTx.paymentMethod}. Your plan activates automatically as soon
-                    as the transfer alert is received.
+                    {pendingSubscriptionTx.paymentMethod}. Open the payment details anytime to see
+                    your QR code and exact centavo amount.
                   </p>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => navigate({ name: 'dashboard' })}
-                className="min-h-[42px] px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl cursor-pointer shrink-0"
-              >
-                Return to Dashboard
-              </button>
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => void handleResumePendingPayment()}
+                  className="min-h-[42px] px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl cursor-pointer shrink-0 inline-flex items-center justify-center gap-1.5"
+                >
+                  <QrCode className="w-4 h-4" />
+                  <span>Continue Payment</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate({ name: 'dashboard' })}
+                  className="min-h-[42px] px-4 py-2 text-xs sm:text-sm font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl cursor-pointer shrink-0"
+                >
+                  Return to Dashboard
+                </button>
+              </div>
             </div>
           )
         )}
@@ -779,11 +902,11 @@ export function UpgradePlanPage() {
 
                   <button
                     type="button"
-                    disabled={(isCurrent && !isDueRenewalCard) || isPendingThisPlan}
+                    disabled={isCurrent && !isDueRenewalCard}
                     onClick={() => handleSelectPlan(plan.id)}
                     className={`w-full min-h-[44px] px-4 py-2.5 text-sm font-semibold rounded-xl transition-colors ${
                       isPendingThisPlan
-                        ? 'bg-amber-400/20 text-amber-200 border border-amber-400/30 cursor-default'
+                        ? 'bg-amber-400 text-slate-950 hover:bg-amber-300 font-bold cursor-pointer shadow-sm'
                         : isDueRenewalCard
                           ? 'bg-amber-400 text-slate-950 hover:bg-amber-300 font-bold cursor-pointer shadow-sm'
                           : isCurrent
@@ -798,7 +921,7 @@ export function UpgradePlanPage() {
                     }`}
                   >
                     {isPendingThisPlan
-                      ? 'Awaiting Payment Confirmation'
+                      ? 'Continue Payment (View QR)'
                       : isDueRenewalCard
                         ? `Pay Due Plan (${plan.priceLabel})`
                         : isCurrent
@@ -933,7 +1056,16 @@ export function UpgradePlanPage() {
                       </div>
 
                       {/* Channel Details OR Live Payment Session */}
-                      {activeChannel && !paymentSession && (
+                      {activeChannel && !paymentSession && isResumingSession && (
+                        <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-5 text-center space-y-2">
+                          <Loader2 className="w-6 h-6 animate-spin text-slate-700 mx-auto" />
+                          <p className="text-xs font-semibold text-slate-700">
+                            Restoring your pending payment details...
+                          </p>
+                        </div>
+                      )}
+
+                      {activeChannel && !paymentSession && !isResumingSession && (
                         <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4 space-y-3">
                           <div className="flex items-center gap-2 text-xs font-semibold text-slate-700">
                             <QrCode className="w-4 h-4 text-slate-900" />
@@ -1234,7 +1366,11 @@ export function UpgradePlanPage() {
                       onClick={() => setPaymentModalOpen(false)}
                       className="w-full min-h-[40px] px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-white hover:bg-slate-100 border border-slate-200/80 rounded-xl transition-colors cursor-pointer"
                     >
-                      {paymentSession?.status === 'paid' ? 'Close' : 'Cancel'}
+                      {paymentSession?.status === 'paid'
+                        ? 'Close'
+                        : paymentSession?.status === 'awaiting_payment'
+                          ? 'Close (Pay Later)'
+                          : 'Cancel'}
                     </button>
                   </div>
 

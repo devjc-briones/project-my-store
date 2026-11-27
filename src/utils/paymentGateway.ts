@@ -145,6 +145,24 @@ export async function pollPaymentSessionIntent(
   return data.session;
 }
 
+export async function fetchPaymentSessionByReference(
+  referenceCode: string
+): Promise<PaymentSessionIntent> {
+  const token = await getAccessToken();
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(
+    `/api/payments/sessions/by-ref/${encodeURIComponent(referenceCode)}`,
+    { headers }
+  );
+  const data = await parseResponseJson<{ session?: PaymentSessionIntent; error?: string }>(res);
+  if (!res.ok || !data?.session) {
+    throw new Error(data?.error || `Unable to resume payment session (HTTP ${res.status}).`);
+  }
+  return data.session;
+}
+
 export async function setAdminGatewayEngine(
   engine: PaymentGatewayEngine
 ): Promise<{ engine: PaymentGatewayEngine; config: PaymentGatewayPublicConfig }> {
