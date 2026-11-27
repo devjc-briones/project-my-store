@@ -13,16 +13,20 @@ import { StoreProductsManagerPage } from './pages/StoreProductsManagerPage';
 import { PublicStorefrontPage } from './pages/PublicStorefrontPage';
 import { UpgradePlanPage } from './pages/UpgradePlanPage';
 import { AdminPage } from './pages/AdminPage';
+import { PageLoader } from './components/common/PageLoader';
 import { ToastContainer } from './components/common/ToastContainer';
 
 function AppRouter() {
-  const { route, state } = useStore();
+  const { route, state, isAuthChecking } = useStore();
 
   if (route.name === 'storefront') {
     return <PublicStorefrontPage />;
   }
 
   if (route.name === 'admin') {
+    if (state.currentUser?.role !== Roles.Admin && isAuthChecking) {
+      return <PageLoader label="Loading admin console..." />;
+    }
     return <AdminPage />;
   }
 
@@ -32,6 +36,9 @@ function AppRouter() {
     }
     if (state.currentUser?.role === Roles.Seller) {
       return <DashboardPage />;
+    }
+    if (isAuthChecking) {
+      return <PageLoader label="Checking session..." />;
     }
     return <AuthPage />;
   }
@@ -46,6 +53,9 @@ function AppRouter() {
     route.name === 'store-payments'
   ) {
     if (!state.currentUser || state.currentUser.role === Roles.Buyer) {
+      if (isAuthChecking) {
+        return <PageLoader label="Loading dashboard..." />;
+      }
       return <AuthPage />;
     }
     if (

@@ -33,6 +33,7 @@ import { PaymentSettingsTab } from '../components/products/PaymentSettingsTab';
 import { OrdersPreviewTab } from '../components/products/OrdersPreviewTab';
 import { StoreOverviewTab } from '../components/products/StoreOverviewTab';
 import { StoreIdentityHeader } from '../components/products/StoreIdentityHeader';
+import { PageLoader } from '../components/common/PageLoader';
 
 type ManagerTab = 'overview' | 'products' | 'payments' | 'orders';
 type StockFilter = 'all' | 'in-stock' | 'sold-out';
@@ -64,6 +65,7 @@ export function StoreProductsManagerPage() {
   const {
     route,
     state,
+    isHydrating,
     navigate,
     getStoreProducts,
     getStoreOrders,
@@ -265,6 +267,9 @@ export function StoreProductsManagerPage() {
   }, [storeProducts, searchQuery, categoryFilter, stockFilter]);
 
   if (!store || !draftPayments) {
+    if (isHydrating) {
+      return <PageLoader label="Loading store..." />;
+    }
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
         <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl p-8 text-center space-y-4">

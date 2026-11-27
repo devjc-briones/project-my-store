@@ -24,6 +24,7 @@ import { AdminStoresTab } from '../components/admin/AdminStoresTab';
 import { AdminRevenueTab } from '../components/admin/AdminRevenueTab';
 import { AdminPaymentSettingsTab } from '../components/admin/AdminPaymentSettingsTab';
 import { AdminOrdersBuyersTab } from '../components/admin/AdminOrdersBuyersTab';
+import { PageLoader } from '../components/common/PageLoader';
 import { useStore } from '../context/StoreContext';
 import { formatPlanPriceLabel } from '../data/plans';
 import {
@@ -83,6 +84,7 @@ const ADMIN_TABS: Array<{
 export function AdminPage() {
   const {
     state,
+    isAuthChecking,
     navigate,
     signInAdminUser,
     signOut,
@@ -378,6 +380,9 @@ export function AdminPage() {
   };
 
   if (!isAdminAuthenticated) {
+    if (isAuthChecking) {
+      return <PageLoader label="Loading admin console..." />;
+    }
     return (
       <div className="min-h-screen bg-[#f8fafc] text-slate-900 flex flex-col justify-between px-4 py-6 sm:px-8">
         <div className="max-w-md w-full mx-auto flex items-center justify-between gap-4">

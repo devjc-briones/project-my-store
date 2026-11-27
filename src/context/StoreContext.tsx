@@ -133,6 +133,8 @@ export interface CreateProductInput {
 
 interface StoreContextValue {
   state: GlobalAppState;
+  isHydrating: boolean;
+  isAuthChecking: boolean;
   route: AppRoute;
   navigate: (next: AppRoute, options?: { replace?: boolean }) => void;
   goBack: (fallback?: AppRoute) => void;
@@ -311,6 +313,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
   const [routeHistory, setRouteHistory] = useState<AppRoute[]>([]);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [isHydrating, setIsHydrating] = useState<boolean>(
+    () => isSupabaseConfigured && Boolean(getSupabaseClient())
+  );
+  const [isAuthChecking, setIsAuthChecking] = useState<boolean>(
+    () => isSupabaseConfigured && Boolean(getSupabaseClient())
+  );
+  const isInitialHydrationRef = useRef(true);
   const authValidationLockRef = useRef(false);
   const hydrateSessionRef = useRef<((explicitSession?: any) => Promise<void>) | null>(null);
   const activeUserIdRef = useRef<string | null>(null);
@@ -318,9 +327,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   // Hydrate state from Supabase on mount if configured
   useEffect(() => {
-    if (!isSupabaseConfigured) return;
+    if (!isSupabaseConfigured) {
+      setIsHydrating(false);
+      setIsAuthChecking(false);
+      return;
+    }
     const client = getSupabaseClient();
-    if (!client) return;
+    if (!client) {
+      setIsHydrating(false);
+      setIsAuthChecking(false);
+      return;
+    }
 
     async function hydrateFromSupabase(explicitSession?: any) {
       try {
@@ -331,6 +348,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         }
         const sessionUserId: string | undefined = activeSession?.user?.id;
         const hasSession = Boolean(sessionUserId);
+        if (!hasSession && isInitialHydrationRef.current) {
+          setIsAuthChecking(false);
+        }
 
         const [
           { data: dbStores },
@@ -814,6 +834,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           });
         } catch (err) {
           console.error('Error hydrating from Supabase:', err);
+        } finally {
+          if (isInitialHydrationRef.current) {
+            isInitialHydrationRef.current = false;
+            setIsAuthChecking(false);
+            setIsHydrating(false);
+          }
         }
       }
 
@@ -3116,6 +3142,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<StoreContextValue>(
     () => ({
       state,
+      isHydrating,
+      isAuthChecking,
       route,
       navigate,
       goBack,
@@ -3168,6 +3196,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }),
     [
       state,
+      isHydrating,
+      isAuthChecking,
       route,
       navigate,
       goBack,

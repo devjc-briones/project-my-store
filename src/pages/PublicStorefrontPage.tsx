@@ -11,11 +11,13 @@ import { ProductDetailModal } from '../components/storefront/ProductDetailModal'
 import { CartLineItem, StorefrontCartDrawer } from '../components/storefront/StorefrontCartDrawer';
 import { BuyerAuthModal } from '../components/storefront/BuyerAuthModal';
 import { BuyerAccountMenuModal } from '../components/storefront/BuyerAccountMenuModal';
+import { PageLoader } from '../components/common/PageLoader';
 
 export function PublicStorefrontPage() {
   const {
     route,
     state,
+    isHydrating,
     navigate,
     getStoreBySlug,
     getStoreProducts,
@@ -64,6 +66,9 @@ export function PublicStorefrontPage() {
   );
 
   if (!store) {
+    if (isHydrating) {
+      return <PageLoader label="Loading storefront..." />;
+    }
     return (
       <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
         <header className="bg-white/95 backdrop-blur-sm border-b border-slate-200/80 h-16 px-4 sm:px-6 flex items-center justify-between">
