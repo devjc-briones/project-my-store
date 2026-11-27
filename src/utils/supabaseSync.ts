@@ -498,3 +498,61 @@ export async function deleteUserFromSupabase(userId: string): Promise<SyncResult
     return { success: false, error: err?.message || 'Unable to delete user from database.' };
   }
 }
+
+export async function syncUserNotificationStatesToSupabase(
+  userId: string,
+  keys: string[],
+  action: 'read' | 'dismiss'
+): Promise<SyncResult> {
+  if (!isSupabaseConfigured || !isUuid(userId)) return { success: false };
+  const uniqueKeys = Array.from(new Set(keys.filter((k) => typeof k === 'string' && k.trim().length > 0)));
+  if (uniqueKeys.length === 0) return { success: true };
+
+  const client = getSupabaseClient();
+  if (!client) return { success: false };
+
+  const nowIso = new Date().toISOString();
+  try {
+    const stateRows = uniqueKeys.map((notificationKey) => ({
+      user_id: userId,
+      notification_key: notificationKey,
+      is_read: true,
+      is_dismissed: action === 'dismiss',
+      updated_at: nowIso,
+    }));
+
+    const { error: stateErr } = await client
+      .from('user_notification_states')
+      .upsert(stateRows as any, { onConflict: 'user_id,notification_key' });
+
+    if (stateErr) {
+      // Silently tolerate environments where user_notification_states has not been migrated yet
+      console.warn('user_notification_states upsert skipped:', stateErr.message);
+    }
+
+    const notifUpdatePayload =
+      action === 'dismiss'
+        ? { is_read: true, read_at: nowIso, is_dismissed: true, dismissed_at: nowIso, updated_at: nowIso }
+        : { is_read: true, read_at: nowIso, updated_at: nowIso };
+
+    await client
+      .from('notifications')
+      .update(notifUpdatePayload as any)
+      .eq('user_id', userId)
+      .in('notification_key', uniqueKeys);
+
+    const uuidKeys = uniqueKeys.filter((k) => isUuid(k));
+    if (uuidKeys.length > 0) {
+      await client
+        .from('notifications')
+        .update(notifUpdatePayload as any)
+        .eq('user_id', userId)
+        .in('id', uuidKeys);
+    }
+
+    return { success: true };
+  } catch {
+    return { success: false };
+  }
+}
+

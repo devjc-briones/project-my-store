@@ -25,6 +25,7 @@ interface DashboardHeaderProps {
 
 interface SellerNotificationItem {
   id: string;
+  orderIds?: string[];
   category: 'order' | 'stock' | 'alert' | 'billing';
   title: string;
   description: string;
@@ -132,6 +133,7 @@ export function DashboardHeader({ sectionLabel }: DashboardHeaderProps) {
 
       const groups: Array<{
         firstOrderId: string;
+        orderIds: string[];
         latestAt: string;
         latestMs: number;
         count: number;
@@ -149,12 +151,14 @@ export function DashboardHeader({ sectionLabel }: DashboardHeaderProps) {
           orderMs - currentGroup.latestMs < TEN_MINUTES_MS
         ) {
           currentGroup.count += 1;
+          currentGroup.orderIds.push(order.id);
           currentGroup.totalAmount += order.grandTotal;
           currentGroup.latestAt = order.createdAt;
           currentGroup.latestMs = orderMs;
         } else {
           groups.push({
             firstOrderId: order.id,
+            orderIds: [order.id],
             latestAt: order.createdAt,
             latestMs: orderMs,
             count: 1,
@@ -166,6 +170,7 @@ export function DashboardHeader({ sectionLabel }: DashboardHeaderProps) {
       groups.forEach((group) => {
         items.push({
           id: `shop_order_${storeId}_${group.firstOrderId}_${group.count}`,
+          orderIds: group.orderIds,
           category: 'order',
           title: `${storeName} received ${group.count} ${group.count === 1 ? 'order' : 'orders'}`,
           description: `Total ${formatCurrency(group.totalAmount, currency)} · Tap to view shop orders`,
@@ -246,7 +251,14 @@ export function DashboardHeader({ sectionLabel }: DashboardHeaderProps) {
     }
 
     return items
-      .filter((item) => item.id.startsWith('plan_due_') || !dismissedSet.has(item.id))
+      .filter((item) => {
+        if (item.id.startsWith('plan_due_')) return true;
+        if (dismissedSet.has(item.id)) return false;
+        if (item.orderIds && item.orderIds.length > 0) {
+          return !item.orderIds.every((oid) => dismissedSet.has(`order_dismiss_${oid}`));
+        }
+        return true;
+      })
       .sort((a, b) => {
         if (a.category === 'alert' && b.category !== 'alert') return -1;
         if (b.category === 'alert' && a.category !== 'alert') return 1;
@@ -270,15 +282,36 @@ export function DashboardHeader({ sectionLabel }: DashboardHeaderProps) {
     [state.readNotificationIds]
   );
 
-  const unreadIds = useMemo(
-    () =>
-      sellerNotifications
-        .filter((item) => !readNotificationSet.has(item.id))
-        .map((item) => item.id),
+  const isNotifItemRead = (item: SellerNotificationItem) => {
+    if (readNotificationSet.has(item.id)) return true;
+    if (item.orderIds && item.orderIds.length > 0) {
+      return item.orderIds.every((oid) => readNotificationSet.has(`order_read_${oid}`));
+    }
+    return false;
+  };
+
+  const getNotifReadKeys = (item: SellerNotificationItem): string[] => [
+    item.id,
+    ...(item.orderIds?.map((oid) => `order_read_${oid}`) ?? []),
+  ];
+
+  const getNotifDismissKeys = (item: SellerNotificationItem): string[] => [
+    item.id,
+    ...(item.orderIds?.map((oid) => `order_dismiss_${oid}`) ?? []),
+    ...(item.orderIds?.map((oid) => `order_read_${oid}`) ?? []),
+  ];
+
+  const unreadItems = useMemo(
+    () => sellerNotifications.filter((item) => !isNotifItemRead(item)),
     [sellerNotifications, readNotificationSet]
   );
 
-  const unreadCount = unreadIds.length;
+  const unreadIds = useMemo(
+    () => unreadItems.flatMap((item) => getNotifReadKeys(item)),
+    [unreadItems]
+  );
+
+  const unreadCount = unreadItems.length;
 
   useEffect(() => {
     if (!dropdownOpen && !notifOpen) return;
@@ -435,7 +468,9 @@ export function DashboardHeader({ sectionLabel }: DashboardHeaderProps) {
                           type="button"
                           tabIndex={notifOpen ? 0 : -1}
                           onClick={() =>
-                            dismissNotifications(sellerNotifications.map((n) => n.id))
+                            dismissNotifications(
+                              sellerNotifications.flatMap((n) => getNotifDismissKeys(n))
+                            )
                           }
                           className="text-[11px] font-semibold text-slate-500 hover:text-slate-800 cursor-pointer shrink-0"
                         >
@@ -460,7 +495,7 @@ export function DashboardHeader({ sectionLabel }: DashboardHeaderProps) {
                   ) : (
                     <div className="max-h-[364px] overflow-y-auto overscroll-contain divide-y divide-slate-100">
                       {sellerNotifications.map((item) => {
-                        const isUnread = !readNotificationSet.has(item.id);
+                        const isUnread = !isNotifItemRead(item);
                         return (
                           <button
                             key={item.id}
@@ -468,7 +503,7 @@ export function DashboardHeader({ sectionLabel }: DashboardHeaderProps) {
                             role="menuitem"
                             tabIndex={notifOpen ? 0 : -1}
                             onClick={() => {
-                              markNotificationsRead([item.id]);
+                              markNotificationsRead(getNotifReadKeys(item));
                               setNotifOpen(false);
                               navigate(item.targetRoute);
                             }}

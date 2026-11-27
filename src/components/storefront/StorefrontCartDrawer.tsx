@@ -125,8 +125,10 @@ export function StorefrontCartDrawer({
   const { state, pushToast, getBuyerCheckoutInfo, saveBuyerCheckoutInfo } = useStore();
 
   const theme = resolveThemeTokens(store.branding, store.templateId);
-  const fallbackImg = TEMPLATE_SHOWCASE_MEDIA[store.templateId].imageUrl;
-  const currency = paymentSettings.currency;
+  const fallbackImg =
+    TEMPLATE_SHOWCASE_MEDIA[store.templateId]?.imageUrl ??
+    TEMPLATE_SHOWCASE_MEDIA['food-restaurant'].imageUrl;
+  const currency = paymentSettings.currency || 'PHP';
 
   const savedBuyerInfo = state.currentBuyer ? getBuyerCheckoutInfo() : null;
   const hasSavedBuyerInfo = Boolean(
@@ -170,6 +172,9 @@ export function StorefrontCartDrawer({
   const [copiedExactAmount, setCopiedExactAmount] = useState(false);
   const [orderCountdownNowMs, setOrderCountdownNowMs] = useState(() => Date.now());
   const autoConfirmedGuardRef = useRef(false);
+  const completeOrderPlacementRef = useRef<
+    ((options?: { paymentStatus?: OrderPaymentStatus; referenceNumber?: string }) => void) | null
+  >(null);
 
   const fullNameRef = useRef<HTMLInputElement | null>(null);
   const phoneRef = useRef<HTMLInputElement | null>(null);
@@ -366,6 +371,71 @@ export function StorefrontCartDrawer({
     enabledPaymentMethods,
   ]);
 
+  // Countdown tick for online order session (always mounted before early null return)
+  useEffect(() => {
+    if (
+      !isOpen ||
+      !paymentQrModalOpen ||
+      !orderPaymentSession ||
+      orderPaymentSession.status !== 'awaiting_payment'
+    ) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setOrderCountdownNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [isOpen, paymentQrModalOpen, orderPaymentSession]);
+
+  // Poll live status while customer completes transfer (always mounted before early null return)
+  useEffect(() => {
+    if (
+      !isOpen ||
+      !paymentQrModalOpen ||
+      !orderPaymentSession ||
+      orderPaymentSession.status !== 'awaiting_payment'
+    ) {
+      return;
+    }
+    let active = true;
+
+    const checkStatus = async () => {
+      try {
+        const latest = await pollPaymentSessionIntent(
+          orderPaymentSession.id,
+          orderPaymentSession.readToken
+        );
+        if (!active) return;
+        setOrderPaymentSession((prev) =>
+          prev ? { ...latest, readToken: prev.readToken } : latest
+        );
+
+        if (latest.status === 'paid' && !autoConfirmedGuardRef.current) {
+          autoConfirmedGuardRef.current = true;
+          completeOrderPlacementRef.current?.({
+            paymentStatus: 'paid',
+            referenceNumber: latest.matchedAlertReference || latest.referenceCode,
+          });
+          pushToast({
+            type: 'success',
+            title: 'Payment confirmed automatically',
+            description: `Reference ${latest.referenceCode} paid—order confirmed with zero receipt upload.`,
+          });
+        }
+      } catch {
+        // Keep polling on transient error
+      }
+    };
+
+    const interval = window.setInterval(checkStatus, 2500);
+    window.addEventListener('focus', checkStatus);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+      window.removeEventListener('focus', checkStatus);
+    };
+  }, [isOpen, paymentQrModalOpen, orderPaymentSession, pushToast]);
+
   if (!isOpen) return null;
 
   const subtotal =
@@ -407,35 +477,35 @@ export function StorefrontCartDrawer({
     selectedPaymentKey === 'gcash'
       ? {
           title: 'GCash Payment',
-          qrUrl: paymentSettings.gcashDetails.qrImageUrl,
+          qrUrl: paymentSettings.gcashDetails?.qrImageUrl,
           numberLabel: 'GCash Number',
           accountNumber:
-            paymentSettings.gcashDetails.mobileNumber || 'Contact store for GCash number',
-          accountName: paymentSettings.gcashDetails.accountName || store.name,
-          extraInfo: paymentSettings.gcashDetails.qrNote,
+            paymentSettings.gcashDetails?.mobileNumber || 'Contact store for GCash number',
+          accountName: paymentSettings.gcashDetails?.accountName || store.name,
+          extraInfo: paymentSettings.gcashDetails?.qrNote,
         }
       : selectedPaymentKey === 'bank'
         ? {
-            title: paymentSettings.bankDetails.bankName
+            title: paymentSettings.bankDetails?.bankName
               ? `${paymentSettings.bankDetails.bankName} Payment`
               : 'Bank Transfer Payment',
-            qrUrl: paymentSettings.bankDetails.qrImageUrl,
+            qrUrl: paymentSettings.bankDetails?.qrImageUrl,
             numberLabel: 'Bank Account Number',
             accountNumber:
-              paymentSettings.bankDetails.accountNumber || 'Contact store for account number',
-            accountName: paymentSettings.bankDetails.accountName || store.name,
-            extraInfo: paymentSettings.bankDetails.bankName
+              paymentSettings.bankDetails?.accountNumber || 'Contact store for account number',
+            accountName: paymentSettings.bankDetails?.accountName || store.name,
+            extraInfo: paymentSettings.bankDetails?.bankName
               ? `Bank: ${paymentSettings.bankDetails.bankName}`
               : undefined,
           }
         : {
             title: 'Maya Payment',
-            qrUrl: paymentSettings.mayaDetails.qrImageUrl,
+            qrUrl: paymentSettings.mayaDetails?.qrImageUrl,
             numberLabel: 'Maya Number',
             accountNumber:
-              paymentSettings.mayaDetails.mobileNumber || 'Contact store for Maya number',
-            accountName: paymentSettings.mayaDetails.accountName || store.name,
-            extraInfo: paymentSettings.mayaDetails.qrNote,
+              paymentSettings.mayaDetails?.mobileNumber || 'Contact store for Maya number',
+            accountName: paymentSettings.mayaDetails?.accountName || store.name,
+            extraInfo: paymentSettings.mayaDetails?.qrNote,
           };
 
   const completeOrderPlacement = (options?: {
@@ -497,6 +567,8 @@ export function StorefrontCartDrawer({
     onClearCart();
   };
 
+  completeOrderPlacementRef.current = completeOrderPlacement;
+
   const startOnlinePaymentSession = async () => {
     if (!selectedMethod) return;
     setIsCreatingOrderSession(true);
@@ -521,69 +593,6 @@ export function StorefrontCartDrawer({
       setIsCreatingOrderSession(false);
     }
   };
-
-  // Countdown tick for online order session
-  useEffect(() => {
-    if (
-      !paymentQrModalOpen ||
-      !orderPaymentSession ||
-      orderPaymentSession.status !== 'awaiting_payment'
-    ) {
-      return;
-    }
-    const timer = window.setInterval(() => {
-      setOrderCountdownNowMs(Date.now());
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [paymentQrModalOpen, orderPaymentSession]);
-
-  // Poll live status while customer completes transfer
-  useEffect(() => {
-    if (
-      !paymentQrModalOpen ||
-      !orderPaymentSession ||
-      orderPaymentSession.status !== 'awaiting_payment'
-    ) {
-      return;
-    }
-    let active = true;
-
-    const checkStatus = async () => {
-      try {
-        const latest = await pollPaymentSessionIntent(
-          orderPaymentSession.id,
-          orderPaymentSession.readToken
-        );
-        if (!active) return;
-        setOrderPaymentSession((prev) =>
-          prev ? { ...latest, readToken: prev.readToken } : latest
-        );
-
-        if (latest.status === 'paid' && !autoConfirmedGuardRef.current) {
-          autoConfirmedGuardRef.current = true;
-          completeOrderPlacement({
-            paymentStatus: 'paid',
-            referenceNumber: latest.matchedAlertReference || latest.referenceCode,
-          });
-          pushToast({
-            type: 'success',
-            title: 'Payment confirmed automatically',
-            description: `Reference ${latest.referenceCode} paid—order confirmed with zero receipt upload.`,
-          });
-        }
-      } catch {
-        // Keep polling on transient error
-      }
-    };
-
-    const interval = window.setInterval(checkStatus, 2500);
-    window.addEventListener('focus', checkStatus);
-    return () => {
-      active = false;
-      window.clearInterval(interval);
-      window.removeEventListener('focus', checkStatus);
-    };
-  }, [paymentQrModalOpen, orderPaymentSession]);
 
   const handleCheckoutSubmit = (e: React.FormEvent) => {
     e.preventDefault();

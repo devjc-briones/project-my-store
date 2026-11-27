@@ -50,6 +50,7 @@ import {
   syncProPlanPriceToSupabase,
   syncStoreToSupabase,
   syncSubscriptionToSupabase,
+  syncUserNotificationStatesToSupabase,
   syncUserToSupabase,
 } from '../utils/supabaseSync';
 import { setAdminProPlanPrice } from '../utils/paymentGateway';
@@ -57,7 +58,52 @@ import { formatAuthError, generateUuid, getSupabaseClient, getSupabaseConfigStat
 import { AppRoute, buildRoutePath, parseRoute } from '../router/routes';
 
 const STORAGE_KEY = 'mystore_saas_state_v2';
+const NOTIF_STATE_STORAGE_PREFIX = 'mystore_notif_state_v1:';
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+interface LocalNotificationState {
+  readIds: string[];
+  dismissedIds: string[];
+}
+
+function loadLocalNotificationState(userId?: string | null): LocalNotificationState {
+  if (!userId || typeof window === 'undefined') {
+    return { readIds: [], dismissedIds: [] };
+  }
+  try {
+    const raw = window.localStorage.getItem(`${NOTIF_STATE_STORAGE_PREFIX}${userId}`);
+    if (!raw) return { readIds: [], dismissedIds: [] };
+    const parsed = JSON.parse(raw) as Partial<LocalNotificationState>;
+    return {
+      readIds: Array.isArray(parsed.readIds)
+        ? parsed.readIds.filter((v): v is string => typeof v === 'string')
+        : [],
+      dismissedIds: Array.isArray(parsed.dismissedIds)
+        ? parsed.dismissedIds.filter((v): v is string => typeof v === 'string')
+        : [],
+    };
+  } catch {
+    return { readIds: [], dismissedIds: [] };
+  }
+}
+
+function saveLocalNotificationState(
+  userId: string | null | undefined,
+  readIds: string[],
+  dismissedIds: string[]
+): void {
+  if (!userId || typeof window === 'undefined') return;
+  try {
+    const dedupRead = Array.from(new Set(readIds)).slice(-500);
+    const dedupDismissed = Array.from(new Set(dismissedIds)).slice(-500);
+    window.localStorage.setItem(
+      `${NOTIF_STATE_STORAGE_PREFIX}${userId}`,
+      JSON.stringify({ readIds: dedupRead, dismissedIds: dedupDismissed })
+    );
+  } catch {
+    // Ignore storage quota errors
+  }
+}
 
 export interface CreateStoreInput {
   name: string;
@@ -267,6 +313,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const authValidationLockRef = useRef(false);
   const hydrateSessionRef = useRef<((explicitSession?: any) => Promise<void>) | null>(null);
+  const activeUserIdRef = useRef<string | null>(null);
+  activeUserIdRef.current = state.currentUser?.id ?? state.currentBuyer?.id ?? null;
 
   // Hydrate state from Supabase on mount if configured
   useEffect(() => {
@@ -306,6 +354,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         let dbPayments: any[] | null = null;
         let dbSubs: any[] | null = null;
         let dbNotifications: any[] | null = null;
+        let dbNotifStates: any[] | null = null;
         let usersFetchFailed = false;
 
         if (hasSession && sessionUserId) {
@@ -316,6 +365,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             paymentsRes,
             subsRes,
             notificationsRes,
+            notifStatesRes,
           ] = await Promise.all([
             client!.from('users').select('*'),
             client!.from('buyer_orders').select('*'),
@@ -323,6 +373,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             client!.from('store_product_payments').select('*'),
             client!.from('subscriptions').select('*'),
             client!.from('notifications').select('*'),
+            client!
+              .from('user_notification_states')
+              .select('notification_key, is_read, is_dismissed')
+              .eq('user_id', sessionUserId),
           ]);
 
           if (usersRes.error) {
@@ -351,6 +405,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           dbPayments = paymentsRes.data;
           dbSubs = subsRes.data;
           dbNotifications = notificationsRes.data;
+          dbNotifStates = notifStatesRes.error ? null : notifStatesRes.data;
         }
 
         const mappedUsers: User[] = (dbUsers || []).map((u: any) => ({
@@ -683,6 +738,56 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
               nextCurrentBuyer = prev.currentBuyer;
             }
 
+            const resolvedUserId =
+              nextCurrentUser?.id ?? nextCurrentBuyer?.id ?? sessionUserId ?? null;
+            let nextReadNotificationIds: string[] = [];
+            let nextDismissedNotificationIds: string[] = [];
+
+            if (resolvedUserId) {
+              const localNotif = loadLocalNotificationState(resolvedUserId);
+              const readSet = new Set<string>(localNotif.readIds);
+              const dismissedSet = new Set<string>(localNotif.dismissedIds);
+
+              const prevActiveId = prev.currentUser?.id ?? prev.currentBuyer?.id ?? null;
+              if (prevActiveId === resolvedUserId) {
+                (prev.readNotificationIds ?? []).forEach((id) => readSet.add(id));
+                (prev.dismissedNotificationIds ?? []).forEach((id) => dismissedSet.add(id));
+              }
+
+              (dbNotifStates || []).forEach((st: any) => {
+                if (typeof st.notification_key === 'string' && st.notification_key) {
+                  if (st.is_read) readSet.add(st.notification_key);
+                  if (st.is_dismissed) {
+                    dismissedSet.add(st.notification_key);
+                    readSet.add(st.notification_key);
+                  }
+                }
+              });
+
+              mappedNotifications.forEach((n) => {
+                if (n.isRead) {
+                  readSet.add(n.id);
+                  if (n.notificationKey) readSet.add(n.notificationKey);
+                }
+                if (n.isDismissed) {
+                  dismissedSet.add(n.id);
+                  readSet.add(n.id);
+                  if (n.notificationKey) {
+                    dismissedSet.add(n.notificationKey);
+                    readSet.add(n.notificationKey);
+                  }
+                }
+              });
+
+              nextReadNotificationIds = Array.from(readSet);
+              nextDismissedNotificationIds = Array.from(dismissedSet);
+              saveLocalNotificationState(
+                resolvedUserId,
+                nextReadNotificationIds,
+                nextDismissedNotificationIds
+              );
+            }
+
             return {
               ...prev,
               users: mappedUsers,
@@ -701,6 +806,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                 updatedAt: new Date().toISOString(),
               },
               notifications: mappedNotifications,
+              readNotificationIds: nextReadNotificationIds,
+              dismissedNotificationIds: nextDismissedNotificationIds,
               currentUser: nextCurrentUser,
               currentBuyer: nextCurrentBuyer,
             };
@@ -740,6 +847,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             currentUser: null,
             currentBuyer: null,
             notifications: [],
+            readNotificationIds: [],
+            dismissedNotificationIds: [],
             placedOrders: [],
             subscriptionTransactions: [],
           }));
@@ -965,10 +1074,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           };
         }
 
+        const localNotif = loadLocalNotificationState(newUser.id);
         setState((prev) => ({
           ...prev,
           currentBuyer: null,
           currentUser: newUser,
+          readNotificationIds: localNotif.readIds,
+          dismissedNotificationIds: localNotif.dismissedIds,
           users: [newUser, ...(prev.users ?? []).filter((u) => u.id !== newUser.id)],
         }));
 
@@ -1132,10 +1244,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         };
         client.from('users').update({ last_active_at: now }).eq('id', authId).then();
 
+        const localNotif = loadLocalNotificationState(activeUser.id);
         setState((prev) => ({
           ...prev,
           currentBuyer: null,
           currentUser: activeUser,
+          readNotificationIds: localNotif.readIds,
+          dismissedNotificationIds: localNotif.dismissedIds,
           users: [activeUser, ...(prev.users ?? []).filter((u) => u.id !== activeUser.id)],
         }));
 
@@ -1237,10 +1352,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
         client.from('users').update({ last_active_at: now }).eq('id', authId).then();
 
+        const localNotif = loadLocalNotificationState(adminUser.id);
         setState((prev) => ({
           ...prev,
           currentBuyer: null,
           currentUser: adminUser,
+          readNotificationIds: localNotif.readIds,
+          dismissedNotificationIds: localNotif.dismissedIds,
           users: [adminUser, ...(prev.users ?? []).filter((u) => u.id !== adminUser.id)],
         }));
 
@@ -1302,7 +1420,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         client.auth.signOut().catch((err) => console.error('Supabase sign-out error:', err));
       }
     }
-    setState((prev) => ({ ...prev, currentUser: null }));
+    setState((prev) => ({
+      ...prev,
+      currentUser: null,
+      notifications: [],
+      readNotificationIds: [],
+      dismissedNotificationIds: [],
+    }));
   }, []);
 
   const buyerSignUp = useCallback(
@@ -2844,11 +2968,21 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const markNotificationsRead = useCallback((ids: string[]) => {
-    if (ids.length === 0) return;
+    const uniqueIds = Array.from(new Set(ids.filter((id) => typeof id === 'string' && id.trim().length > 0)));
+    if (uniqueIds.length === 0) return;
+
+    const userId = activeUserIdRef.current;
+    if (userId) {
+      const local = loadLocalNotificationState(userId);
+      const nextLocalRead = Array.from(new Set([...local.readIds, ...uniqueIds]));
+      saveLocalNotificationState(userId, nextLocalRead, local.dismissedIds);
+      void syncUserNotificationStatesToSupabase(userId, uniqueIds, 'read');
+    }
+
     setState((prev) => {
       const next = new Set(prev.readNotificationIds ?? []);
       let changed = false;
-      ids.forEach((id) => {
+      uniqueIds.forEach((id) => {
         if (!next.has(id)) {
           next.add(id);
           changed = true;
@@ -2863,11 +2997,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const dismissNotifications = useCallback((ids: string[]) => {
-    if (ids.length === 0) return;
+    const uniqueIds = Array.from(new Set(ids.filter((id) => typeof id === 'string' && id.trim().length > 0)));
+    if (uniqueIds.length === 0) return;
+
+    const userId = activeUserIdRef.current;
+    if (userId) {
+      const local = loadLocalNotificationState(userId);
+      const nextLocalDismissed = Array.from(new Set([...local.dismissedIds, ...uniqueIds]));
+      const nextLocalRead = Array.from(new Set([...local.readIds, ...uniqueIds]));
+      saveLocalNotificationState(userId, nextLocalRead, nextLocalDismissed);
+      void syncUserNotificationStatesToSupabase(userId, uniqueIds, 'dismiss');
+    }
+
     setState((prev) => {
       const nextDismissed = new Set(prev.dismissedNotificationIds ?? []);
       const nextRead = new Set(prev.readNotificationIds ?? []);
-      ids.forEach((id) => {
+      uniqueIds.forEach((id) => {
         nextDismissed.add(id);
         nextRead.add(id);
       });
