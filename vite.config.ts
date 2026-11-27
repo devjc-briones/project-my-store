@@ -29,6 +29,30 @@ export default defineConfig(() => {
           if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
             fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
           }
+
+          const indexHtmlPath = path.resolve(distDir, 'index.html');
+          if (fs.existsSync(indexHtmlPath)) {
+            let html = fs.readFileSync(indexHtmlPath, 'utf8');
+            html = html.replace(/<link\b[^>]*>/gi, (fullTag) => {
+              if (!/\brel=["']stylesheet["']/i.test(fullTag)) {
+                return fullTag;
+              }
+              const hrefMatch = fullTag.match(/\bhref=["'](\/assets\/[^"']+\.css)["']/i);
+              if (!hrefMatch) {
+                return fullTag;
+              }
+              const cssHref = hrefMatch[1];
+              const cssPath = path.resolve(distDir, cssHref.replace(/^\/+/, ''));
+              if (!fs.existsSync(cssPath)) {
+                return fullTag;
+              }
+              const cssContent = fs
+                .readFileSync(cssPath, 'utf8')
+                .replace(/<\/style/gi, '<\\/style');
+              return `<style data-inlined-href="${cssHref}">${cssContent}</style>`;
+            });
+            fs.writeFileSync(indexHtmlPath, html, 'utf8');
+          }
         },
       },
     ],
