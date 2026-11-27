@@ -123,7 +123,13 @@ export function AdminPage() {
   const isAdminAuthenticated = state.currentUser?.role === Roles.Admin;
 
   const users = useMemo(() => {
-    return (state.users ?? []).filter((u) => u.role !== Roles.Admin);
+    return (state.users ?? []).filter(
+      (u) =>
+        u.role !== Roles.Admin &&
+        u.role !== Roles.Buyer &&
+        Number(u.roleId) !== 1 &&
+        Number(u.roleId) !== 3
+    );
   }, [state.users]);
 
   const transactions = state.subscriptionTransactions ?? [];

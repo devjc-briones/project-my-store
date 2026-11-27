@@ -104,9 +104,21 @@ export function AdminUsersTab({
       .sort((a, b) => b.count - a.count);
   }, [buyers, stores]);
 
+  const merchantUsers = useMemo(
+    () =>
+      users.filter(
+        (u) =>
+          u.role !== Roles.Admin &&
+          u.role !== Roles.Buyer &&
+          Number(u.roleId) !== 1 &&
+          Number(u.roleId) !== 3
+      ),
+    [users]
+  );
+
   const filteredUsers = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return users.filter((u) => {
+    return merchantUsers.filter((u) => {
       if (filter === 'pro' && u.plan !== 'pro') return false;
       if (filter === 'free' && u.plan !== 'starter') return false;
       if (filter === 'dues' && !isUserPlanUnpaidDue(u, transactions)) return false;
@@ -121,7 +133,7 @@ export function AdminUsersTab({
       }
       return true;
     });
-  }, [users, transactions, search, filter]);
+  }, [merchantUsers, transactions, search, filter]);
 
   const filteredBuyers = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -198,7 +210,7 @@ export function AdminUsersTab({
             }`}
           >
             <Users className="w-3.5 h-3.5" />
-            <span>Merchants ({users.length})</span>
+            <span>Merchants ({merchantUsers.length})</span>
           </button>
           <button
             type="button"
@@ -246,16 +258,16 @@ export function AdminUsersTab({
             >
               {(
                 [
-                  { id: 'all', label: `All (${users.length})` },
-                  { id: 'pro', label: `Pro (${users.filter((u) => u.plan === 'pro').length})` },
-                  { id: 'free', label: `Free (${users.filter((u) => u.plan === 'starter').length})` },
+                  { id: 'all', label: `All (${merchantUsers.length})` },
+                  { id: 'pro', label: `Pro (${merchantUsers.filter((u) => u.plan === 'pro').length})` },
+                  { id: 'free', label: `Free (${merchantUsers.filter((u) => u.plan === 'starter').length})` },
                   {
                     id: 'dues',
-                    label: `Dues (${users.filter((u) => isUserPlanUnpaidDue(u, transactions)).length})`,
+                    label: `Dues (${merchantUsers.filter((u) => isUserPlanUnpaidDue(u, transactions)).length})`,
                   },
                   {
                     id: 'restricted',
-                    label: `Restricted (${users.filter((u) => u.status === 'restricted').length})`,
+                    label: `Restricted (${merchantUsers.filter((u) => u.status === 'restricted').length})`,
                   },
                 ] as const
               ).map((tab) => (
