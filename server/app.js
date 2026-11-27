@@ -1,10 +1,10 @@
 import express from 'express';
 import {
+  checkAdminAccess,
   createPaymentSession,
   extractBearerToken,
   getPaymentSessionStatus,
   getPublicGatewayConfig,
-  isCallerAdmin,
   listActiveIntentsForAdmin,
   processLocalWebhookAlert,
   processPaymongoWebhook,
@@ -183,9 +183,9 @@ export function createPaymentsApiApp() {
   app.post('/api/payments/admin/engine', async (req, res) => {
     try {
       const accessToken = extractBearerToken(req.headers.authorization);
-      const adminAllowed = await isCallerAdmin(accessToken);
-      if (!adminAllowed) {
-        res.status(403).json({ error: 'Admin privileges required.' });
+      const adminCheck = await checkAdminAccess(accessToken);
+      if (!adminCheck.allowed) {
+        res.status(403).json({ error: adminCheck.reason || 'Admin privileges required.' });
         return;
       }
 
@@ -209,9 +209,9 @@ export function createPaymentsApiApp() {
   app.get('/api/payments/admin/intents', async (req, res) => {
     try {
       const accessToken = extractBearerToken(req.headers.authorization);
-      const adminAllowed = await isCallerAdmin(accessToken);
-      if (!adminAllowed) {
-        res.status(403).json({ error: 'Admin privileges required.' });
+      const adminCheck = await checkAdminAccess(accessToken);
+      if (!adminCheck.allowed) {
+        res.status(403).json({ error: adminCheck.reason || 'Admin privileges required.' });
         return;
       }
       const activity = await listActiveIntentsForAdmin();
@@ -224,9 +224,9 @@ export function createPaymentsApiApp() {
   app.post('/api/payments/admin/test-webhook', async (req, res) => {
     try {
       const accessToken = extractBearerToken(req.headers.authorization);
-      const adminAllowed = await isCallerAdmin(accessToken);
-      if (!adminAllowed) {
-        res.status(403).json({ error: 'Admin privileges required.' });
+      const adminCheck = await checkAdminAccess(accessToken);
+      if (!adminCheck.allowed) {
+        res.status(403).json({ error: adminCheck.reason || 'Admin privileges required.' });
         return;
       }
 

@@ -15,16 +15,28 @@ const memoryRecentAlerts = [];
 let runtimeActiveEngine =
   process.env.PAYMENT_ENGINE_DEFAULT === 'paymongo' ? 'paymongo' : 'auto_match';
 
+function cleanEnvValue(raw) {
+  return String(raw || '')
+    .trim()
+    .replace(/^['"]|['"]$/g, '')
+    .trim();
+}
+
 function getSupabaseServerConfig() {
-  const url = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
-  const serviceKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
-  const anonKey = (process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '').trim();
-  return { url, serviceKey, anonKey };
+  const url = cleanEnvValue(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL).replace(
+    /\/+$/,
+    ''
+  );
+  const viteUrl = cleanEnvValue(process.env.VITE_SUPABASE_URL).replace(/\/+$/, '');
+  const serviceKey = cleanEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY);
+  const anonKey = cleanEnvValue(process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY);
+  return { url, viteUrl, serviceKey, anonKey };
 }
 
 export function isSupabaseServerAuthConfigured() {
-  const { url, serviceKey, anonKey } = getSupabaseServerConfig();
-  return Boolean(url.startsWith('https://') && (serviceKey || anonKey));
+  const { url, viteUrl, serviceKey, anonKey } = getSupabaseServerConfig();
+  const activeUrl = url || viteUrl;
+  return Boolean(activeUrl.startsWith('https://') && (serviceKey || anonKey));
 }
 
 function getSupabaseAdminClient() {
@@ -35,14 +47,15 @@ function getSupabaseAdminClient() {
   });
 }
 
-function getSupabaseAnonOrScopedClient(accessToken) {
+function getSupabaseAnonOrScopedClient(accessToken, overrideUrl) {
   const { url, serviceKey, anonKey } = getSupabaseServerConfig();
-  const key = serviceKey || anonKey;
-  if (!url.startsWith('https://') || !key) return null;
-  return createClient(url, key, {
+  const targetUrl = overrideUrl || url;
+  const key = (!overrideUrl ? serviceKey : '') || anonKey;
+  if (!targetUrl.startsWith('https://') || !key) return null;
+  return createClient(targetUrl, key, {
     auth: { persistSession: false, autoRefreshToken: false },
     global:
-      accessToken && !serviceKey
+      accessToken && (Boolean(overrideUrl) || !serviceKey)
         ? { headers: { Authorization: `Bearer ${accessToken}` } }
         : undefined,
   });
@@ -61,44 +74,129 @@ export function extractBearerToken(authHeader) {
 }
 
 export async function verifySupabaseCaller(accessToken) {
-  const { url, serviceKey, anonKey } = getSupabaseServerConfig();
-  if (!url.startsWith('https://') || (!serviceKey && !anonKey)) {
-    return { authenticated: false };
+  const { url, viteUrl, serviceKey, anonKey } = getSupabaseServerConfig();
+  if (!isSupabaseServerAuthConfigured()) {
+    return { authenticated: false, reason: 'Supabase auth is not configured on the server.' };
   }
   if (!accessToken) {
-    return { authenticated: false };
-  }
-  const client = getSupabaseAdminClient() || getSupabaseAnonOrScopedClient(accessToken);
-  if (!client) return { authenticated: false };
-
-  try {
-    const { data, error } = await client.auth.getUser(accessToken);
-    if (error || !data?.user?.id) {
-      return { authenticated: false };
-    }
-    const { data: userRow } = await client
-      .from('users')
-      .select('role_id, email')
-      .eq('id', data.user.id)
-      .maybeSingle();
-
     return {
-      authenticated: true,
-      userId: data.user.id,
-      email: userRow?.email || data.user.email || undefined,
-      roleId: typeof userRow?.role_id === 'number' ? userRow.role_id : undefined,
+      authenticated: false,
+      reason: 'No active admin login token found. Please sign out and sign in again.',
     };
-  } catch {
-    return { authenticated: false };
   }
+
+  const candidateClients = [];
+  const adminClient = getSupabaseAdminClient();
+  if (adminClient) candidateClients.push({ client: adminClient, isService: true });
+  if (anonKey && url.startsWith('https://')) {
+    candidateClients.push({
+      client: createClient(url, anonKey, {
+        auth: { persistSession: false, autoRefreshToken: false },
+        global: { headers: { Authorization: `Bearer ${accessToken}` } },
+      }),
+      isService: false,
+    });
+  }
+  if (anonKey && viteUrl.startsWith('https://') && viteUrl !== url) {
+    candidateClients.push({
+      client: createClient(viteUrl, anonKey, {
+        auth: { persistSession: false, autoRefreshToken: false },
+        global: { headers: { Authorization: `Bearer ${accessToken}` } },
+      }),
+      isService: false,
+    });
+  }
+
+  let verifiedUser = null;
+  let verifiedClient = null;
+  let lastAuthError = '';
+
+  for (const entry of candidateClients) {
+    try {
+      const { data, error } = await entry.client.auth.getUser(accessToken);
+      if (!error && data?.user?.id) {
+        verifiedUser = data.user;
+        verifiedClient = entry.client;
+        break;
+      }
+      if (error?.message) lastAuthError = error.message;
+    } catch (err) {
+      if (err?.message) lastAuthError = err.message;
+    }
+  }
+
+  if (!verifiedUser?.id || !verifiedClient) {
+    return {
+      authenticated: false,
+      reason: lastAuthError
+        ? `Session verification failed (${lastAuthError}). Please sign out and log back in.`
+        : 'Admin session expired or invalid. Please sign out and log back in.',
+    };
+  }
+
+  let userRow = null;
+  const lookupClients = [adminClient, verifiedClient].filter(Boolean);
+  for (const dbClient of lookupClients) {
+    try {
+      const { data, error } = await dbClient
+        .from('users')
+        .select('role_id, email')
+        .eq('id', verifiedUser.id)
+        .maybeSingle();
+      if (!error && data) {
+        userRow = data;
+        break;
+      }
+    } catch {
+      // Try next client
+    }
+  }
+
+  const parsedRoleId =
+    userRow?.role_id !== undefined && userRow?.role_id !== null
+      ? Number(userRow.role_id)
+      : undefined;
+
+  return {
+    authenticated: true,
+    userId: verifiedUser.id,
+    email: userRow?.email || verifiedUser.email || undefined,
+    roleId: Number.isFinite(parsedRoleId) ? parsedRoleId : undefined,
+    reason: !userRow ? 'Admin user profile row not found in public.users table.' : undefined,
+  };
+}
+
+export async function checkAdminAccess(accessToken) {
+  if (!isSupabaseServerAuthConfigured()) {
+    if (process.env.NODE_ENV !== 'production') {
+      return { allowed: true };
+    }
+    return {
+      allowed: false,
+      reason: 'Server Supabase configuration missing (SUPABASE_URL / key).',
+    };
+  }
+  const caller = await verifySupabaseCaller(accessToken);
+  if (!caller.authenticated) {
+    return {
+      allowed: false,
+      reason: caller.reason || 'Admin session required. Please sign in again.',
+    };
+  }
+  if (caller.roleId !== 1) {
+    return {
+      allowed: false,
+      reason:
+        caller.reason ||
+        `Admin privileges required (account role_id is ${caller.roleId ?? 'unset'}, expected 1).`,
+    };
+  }
+  return { allowed: true, caller };
 }
 
 export async function isCallerAdmin(accessToken) {
-  if (!isSupabaseServerAuthConfigured()) {
-    return process.env.NODE_ENV !== 'production';
-  }
-  const caller = await verifySupabaseCaller(accessToken);
-  return caller.authenticated && caller.roleId === 1;
+  const result = await checkAdminAccess(accessToken);
+  return result.allowed;
 }
 
 function roundMoney(value) {

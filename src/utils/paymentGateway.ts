@@ -57,7 +57,20 @@ async function getAccessToken(): Promise<string | undefined> {
   if (!client) return undefined;
   try {
     const { data } = await client.auth.getSession();
-    return data?.session?.access_token;
+    let session = data?.session ?? null;
+    if (!session?.access_token) {
+      const refreshed = await client.auth.refreshSession().catch(() => null);
+      session = refreshed?.data?.session ?? null;
+    } else if (
+      typeof session.expires_at === 'number' &&
+      session.expires_at * 1000 < Date.now() + 60_000
+    ) {
+      const refreshed = await client.auth.refreshSession().catch(() => null);
+      if (refreshed?.data?.session?.access_token) {
+        session = refreshed.data.session;
+      }
+    }
+    return session?.access_token;
   } catch {
     return undefined;
   }
