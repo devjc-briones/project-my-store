@@ -41,6 +41,7 @@ import {
 } from '../../utils/paymentGateway';
 import { formatCurrency } from '../../utils/pricing';
 import { useStore } from '../../context/StoreContext';
+import { DynamicQrPhCode } from '../payments/DynamicQrPhCode';
 import { BuyerAuthModal } from './BuyerAuthModal';
 
 export interface CartLineItem {
@@ -1788,16 +1789,17 @@ export function StorefrontCartDrawer({
                     </div>
                   )}
 
-                  {/* 1. QR Code */}
+                  {/* 1. Dynamic QR Ph Code (Exact centavo amount auto-encoded) */}
                   {qrPaymentDetails.qrUrl && (
                     <div className="flex flex-col items-center text-center space-y-2">
-                      <div className="p-2.5 bg-white rounded-2xl border border-slate-200 shadow-xs inline-flex items-center justify-center">
-                        <img
-                          src={qrPaymentDetails.qrUrl}
-                          alt={`${qrPaymentDetails.title} QR Code`}
-                          className="w-36 h-36 sm:w-44 sm:h-44 object-contain rounded-lg"
-                        />
-                      </div>
+                      <DynamicQrPhCode
+                        qrImageUrl={qrPaymentDetails.qrUrl}
+                        exactAmount={orderPaymentSession?.uniquePayableAmount}
+                        currencySymbol={currency === 'PHP' ? '₱' : `${currency} `}
+                        alt={`${qrPaymentDetails.title} QR Code`}
+                        imgClassName="w-36 h-36 sm:w-44 sm:h-44 object-contain rounded-lg"
+                        wrapperClassName="flex flex-col items-center gap-1.5"
+                      />
                     </div>
                   )}
 

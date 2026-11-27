@@ -22,6 +22,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { AdminModalWrapper } from './AdminModalWrapper';
+import { DynamicQrPhCode, useQrPhInspection } from '../payments/DynamicQrPhCode';
 import { useStore } from '../../context/StoreContext';
 import { createDefaultPlatformPaymentSettings } from '../../data/platformPayments';
 import { DEFAULT_PRO_MONTHLY_PRICE, formatPlanPriceLabel } from '../../data/plans';
@@ -911,13 +912,13 @@ export function AdminPaymentSettingsTab({
                 <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-4 space-y-3">
                   <div className="flex flex-col sm:flex-row items-center gap-3.5">
                     {activePreviewChannel.qrImageUrl && (
-                      <div className="p-2 bg-white rounded-xl border border-slate-200 shrink-0">
-                        <img
-                          src={activePreviewChannel.qrImageUrl}
-                          alt={`${activePreviewChannel.label} QR Preview`}
-                          className="w-24 h-24 object-contain rounded"
-                        />
-                      </div>
+                      <DynamicQrPhCode
+                        qrImageUrl={activePreviewChannel.qrImageUrl}
+                        exactAmount={activeProPrice + 0.01}
+                        alt={`${activePreviewChannel.label} QR Preview`}
+                        imgClassName="w-24 h-24 object-contain rounded"
+                        wrapperClassName="flex flex-col items-center gap-1.5 shrink-0"
+                      />
                     )}
                     <div className="flex-1 min-w-0 text-center sm:text-left space-y-1.5">
                       <p className="text-xs font-bold text-slate-900">
@@ -1011,16 +1012,17 @@ export function AdminPaymentSettingsTab({
               <div className="lg:col-span-7 min-w-0 bg-slate-50 border border-slate-200/80 rounded-xl p-3.5 space-y-2">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-bold text-slate-900">
-                    Auto-Match QR Ph + Alert Webhook
+                    Own Dynamic QR Ph + Alert Webhook
                   </span>
                   <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-900 text-white shrink-0">
-                    Active
+                    Active · Zero 3rd-Party Gateway
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-600 leading-relaxed">
-                  2-step local setup: (1) Turn on your GCash, Maya, or Bank cards above with your
-                  Account Name, Number, and QR image, then Save Settings. (2) Optionally point an
-                  Android SMS/email forwarder to the webhook URL below for instant auto-approval.
+                  2-step local setup: (1) Upload your GCash/InstaPay, Maya, or Bank QR Ph image
+                  above—checkout automatically encodes the exact centavo amount into the QR. (2)
+                  Point your Android SMS/email forwarder to the webhook URL below for instant
+                  auto-approval.
                 </p>
               </div>
 
@@ -1422,6 +1424,7 @@ function ChannelQrUploader({
   onRemove: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const qrInspection = useQrPhInspection(qrImageUrl);
 
   return (
     <div className="rounded-xl border border-slate-200/80 bg-slate-50/70 p-3">
@@ -1458,10 +1461,17 @@ function ChannelQrUploader({
             <div className="flex items-center gap-1.5 flex-wrap">
               <p className="text-xs font-bold text-slate-900">{label}</p>
               {qrImageUrl ? (
-                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700">
-                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                  Uploaded
-                </span>
+                qrInspection?.isEmvCoQrPh ? (
+                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    QR Ph Auto-Amount Ready ({qrInspection.networkHint})
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    Uploaded
+                  </span>
+                )
               ) : (
                 <span className="text-[11px] font-medium text-slate-500">
                   No QR uploaded
@@ -1470,8 +1480,10 @@ function ChannelQrUploader({
             </div>
             <p className="text-[11px] text-slate-500 mt-0.5">
               {qrImageUrl
-                ? 'Shown directly to users when paying for their plan.'
-                : 'Upload your QR code image so users can scan to pay.'}
+                ? qrInspection?.isEmvCoQrPh
+                  ? 'Exact centavo amount will be encoded directly into this QR at checkout.'
+                  : 'Shown directly to users when paying for their plan.'
+                : 'Upload your GCash InstaPay, Maya, or Bank QR code image.'}
             </p>
           </div>
         </div>

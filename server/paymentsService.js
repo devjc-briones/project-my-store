@@ -268,6 +268,7 @@ function pruneExpiredMemoryIntents(nowMs = Date.now()) {
 }
 
 export async function getActiveGatewayEngine() {
+  const paymongoConfigured = Boolean((process.env.PAYMONGO_SECRET_KEY || '').trim());
   const adminClient = getSupabaseAdminClient() || getSupabaseAnonOrScopedClient();
   if (adminClient) {
     try {
@@ -276,12 +277,17 @@ export async function getActiveGatewayEngine() {
         .select('active_engine')
         .eq('id', 'default')
         .maybeSingle();
-      if (data?.active_engine === 'paymongo' || data?.active_engine === 'auto_match') {
-        runtimeActiveEngine = data.active_engine;
+      if (data?.active_engine === 'auto_match') {
+        runtimeActiveEngine = 'auto_match';
+      } else if (data?.active_engine === 'paymongo' && paymongoConfigured) {
+        runtimeActiveEngine = 'paymongo';
       }
     } catch {
       // Fallback cleanly if table hasn't been created yet
     }
+  }
+  if (runtimeActiveEngine === 'paymongo' && !paymongoConfigured) {
+    return 'auto_match';
   }
   return runtimeActiveEngine;
 }
@@ -961,7 +967,7 @@ export function parseLocalCreditAlert(payload) {
   let amount;
 
   if (payload.amount !== undefined && payload.amount !== null && payload.amount !== '') {
-    const cleaned = String(payload.amount).replace(/[₱,\s]/g, '');
+    const cleaned = String(payload.amount).replace(/[₱,\s]/g, '').replace(/^(?:PHP|PhP|P)\s*/i, '');
     const parsed = Number(cleaned);
     if (Number.isFinite(parsed) && parsed > 0) {
       amount = roundMoney(parsed);
@@ -969,9 +975,16 @@ export function parseLocalCreditAlert(payload) {
   }
 
   if (amount === undefined && rawText) {
+    const creditContextMatch = rawText.match(
+      /(?:received|credited|credit(?:\s+of)?|deposit(?:ed)?|transferred|sent\s+you|incoming|payment(?:\s+of)?|amount(?:\s+of)?)[:\s]*(?:is\s+)?(?:of\s+)?(?:PHP|PhP|₱|P(?=\s*\d))?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?)/i
+    );
     const currencyMatch =
-      rawText.match(/(?:PHP|₱|PhP)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?|[0-9]+\.[0-9]{2})/i) ||
+      creditContextMatch ||
+      rawText.match(
+        /(?:PHP|PhP|₱|P(?=\s*\d))\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?)/i
+      ) ||
       rawText.match(/\b([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2}|[0-9]+\.[0-9]{2})\b/);
+
     if (currencyMatch?.[1]) {
       const parsed = Number(currencyMatch[1].replace(/,/g, ''));
       if (Number.isFinite(parsed) && parsed > 0) {
@@ -985,7 +998,17 @@ export function parseLocalCreditAlert(payload) {
   if (!channel) {
     if (lower.includes('gcash')) channel = 'gcash';
     else if (lower.includes('maya') || lower.includes('paymaya')) channel = 'maya';
-    else if (lower.includes('instapay') || lower.includes('pesonet') || lower.includes('bank')) {
+    else if (
+      lower.includes('instapay') ||
+      lower.includes('pesonet') ||
+      lower.includes('seabank') ||
+      lower.includes('gotyme') ||
+      lower.includes('bpi') ||
+      lower.includes('unionbank') ||
+      lower.includes('bdo') ||
+      lower.includes('metrobank') ||
+      lower.includes('bank')
+    ) {
       channel = 'bank';
     } else {
       channel = 'qrph';
@@ -998,9 +1021,9 @@ export function parseLocalCreditAlert(payload) {
       : undefined;
   if (!reference && rawText) {
     const refMatch = rawText.match(
-      /(?:ref(?:erence)?\.?\s*(?:no\.?|#|number)?[:\s-]*)([A-Z0-9-]{6,24})/i
+      /(?:ref(?:erence)?\.?\s*(?:no\.?|#|id|number)?|trace\s*(?:no\.?|#)?)[:\s-]*([A-Z0-9][A-Z0-9 -]{4,24}[A-Z0-9])/i
     );
-    if (refMatch?.[1]) reference = refMatch[1].trim();
+    if (refMatch?.[1]) reference = refMatch[1].replace(/\s+/g, '').trim();
   }
 
   const sender =

@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { DashboardHeader } from '../components/dashboard/DashboardHeader';
+import { DynamicQrPhCode } from '../components/payments/DynamicQrPhCode';
 import { useStore } from '../context/StoreContext';
 import { getPlatformPlans, PlanId } from '../data/plans';
 import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
@@ -1209,13 +1210,13 @@ export function UpgradePlanPage() {
                               {activeChannel && (
                                 <div className="flex flex-col sm:flex-row items-center gap-4">
                                   {activeChannel.qrImageUrl && (
-                                    <div className="p-2 bg-white rounded-2xl border border-slate-200 shadow-xs shrink-0">
-                                      <img
-                                        src={activeChannel.qrImageUrl}
-                                        alt={`${activeChannel.label} Payment QR`}
-                                        className="w-32 h-32 sm:w-36 sm:h-36 object-contain rounded-lg"
-                                      />
-                                    </div>
+                                    <DynamicQrPhCode
+                                      qrImageUrl={activeChannel.qrImageUrl}
+                                      exactAmount={paymentSession.uniquePayableAmount}
+                                      alt={`${activeChannel.label} Payment QR`}
+                                      imgClassName="w-32 h-32 sm:w-36 sm:h-36 object-contain rounded-lg"
+                                      wrapperClassName="flex flex-col items-center gap-1.5 shrink-0"
+                                    />
                                   )}
 
                                   <div

@@ -11,6 +11,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { useStore } from '../../context/StoreContext';
+import { useQrPhInspection } from '../payments/DynamicQrPhCode';
 import { CurrencyCode, PaymentSettings } from '../../types/schema';
 import { readImageFileAsDataUrl } from '../../utils/paymentQr';
 import { formatCurrency, getCurrencySymbol } from '../../utils/pricing';
@@ -49,6 +50,7 @@ function QrCodeUploader({
   onError,
 }: QrCodeUploaderProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const qrInspection = useQrPhInspection(qrImageUrl);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -105,10 +107,17 @@ function QrCodeUploader({
             <div className="flex items-center gap-1.5 flex-wrap">
               <p className="text-xs font-bold text-slate-900">{label}</p>
               {qrImageUrl ? (
-                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700">
-                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                  Uploaded
-                </span>
+                qrInspection?.isEmvCoQrPh ? (
+                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    QR Ph Auto-Amount Ready ({qrInspection.networkHint})
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    Uploaded
+                  </span>
+                )
               ) : (
                 <span
                   className={`inline-flex items-center gap-1 text-[11px] font-semibold ${
@@ -122,8 +131,10 @@ function QrCodeUploader({
             </div>
             <p className="text-[11px] text-slate-500 mt-0.5">
               {qrImageUrl
-                ? 'Customers scan this QR and pay the exact auto-matched amount (no receipt upload).'
-                : 'Upload a QR image or enter your account/mobile number below to enable Zero-Receipt checkout.'}
+                ? qrInspection?.isEmvCoQrPh
+                  ? 'Checkout automatically encodes the exact centavo total into this QR for instant auto-match.'
+                  : 'Customers scan this QR and pay the exact auto-matched amount (no receipt upload).'
+                : 'Upload your GCash InstaPay, Maya, or Bank QR image or enter your account/mobile number below.'}
             </p>
           </div>
         </div>
