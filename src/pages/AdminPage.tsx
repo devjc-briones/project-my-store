@@ -25,7 +25,7 @@ import { AdminRevenueTab } from '../components/admin/AdminRevenueTab';
 import { AdminPaymentSettingsTab } from '../components/admin/AdminPaymentSettingsTab';
 import { AdminOrdersBuyersTab } from '../components/admin/AdminOrdersBuyersTab';
 import { useStore } from '../context/StoreContext';
-import { PLATFORM_PLANS } from '../data/plans';
+import { formatPlanPriceLabel } from '../data/plans';
 import {
   OrderFulfillmentStatus,
   OrderPaymentStatus,
@@ -80,8 +80,6 @@ const ADMIN_TABS: Array<{
   },
 ];
 
-const PRO_PRICE = PLATFORM_PLANS.find((p) => p.id === 'pro')?.monthlyPrice ?? 369;
-
 export function AdminPage() {
   const {
     state,
@@ -98,7 +96,9 @@ export function AdminPage() {
     updateOrderStatus,
     updateOrderPaymentStatus,
     platformPaymentSettings,
+    proMonthlyPrice,
     updatePlatformPaymentSettings,
+    updateProMonthlyPrice,
   } = useStore();
 
   const [activeTab, setActiveTab] = useState<AdminTabId>('overview');
@@ -180,7 +180,7 @@ export function AdminPage() {
         userName: target.name,
         userEmail: target.email,
         planId: 'pro',
-        amount: PRO_PRICE,
+        amount: proMonthlyPrice,
         paymentMethod: 'Admin Grant',
       });
     }
@@ -188,7 +188,7 @@ export function AdminPage() {
       type: 'success',
       title: `Updated plan to ${nextPlan === 'pro' ? 'Pro' : 'Free'}`,
       description: `${target?.name ?? 'User'} is now on the ${
-        nextPlan === 'pro' ? 'Pro (₱369/mo)' : 'Free'
+        nextPlan === 'pro' ? `Pro (${formatPlanPriceLabel(proMonthlyPrice)}/mo)` : 'Free'
       } tier.`,
     });
   };
@@ -291,7 +291,7 @@ export function AdminPage() {
       userName: user.name,
       userEmail: user.email,
       planId: 'pro',
-      amount: PRO_PRICE,
+      amount: proMonthlyPrice,
       paymentMethod,
       status,
     });
@@ -300,8 +300,8 @@ export function AdminPage() {
       title: status === 'paid' ? 'Pro payment recorded' : 'Pending payment logged',
       description:
         status === 'paid'
-          ? `Logged ₱${PRO_PRICE} via ${paymentMethod} for ${user.name}. Payment completed notification sent.`
-          : `Logged ₱${PRO_PRICE} via ${paymentMethod} for ${user.name} as pending approval.`,
+          ? `Logged ${formatPlanPriceLabel(proMonthlyPrice)} via ${paymentMethod} for ${user.name}. Payment completed notification sent.`
+          : `Logged ${formatPlanPriceLabel(proMonthlyPrice)} via ${paymentMethod} for ${user.name} as pending approval.`,
     });
   };
 
@@ -701,6 +701,7 @@ export function AdminPage() {
               transactions={transactions}
               ordersCount={orders.length}
               ordersGmv={ordersGmv}
+              proPrice={proMonthlyPrice}
               onNavigateTab={switchTab}
               onQuickUnrestrictUser={(userId) => {
                 const target = users.find((u) => u.id === userId);
@@ -721,6 +722,7 @@ export function AdminPage() {
               transactions={transactions}
               currentUserId={state.currentUser?.id}
               initialBuyerStoreId={buyerFilterStoreId}
+              proPrice={proMonthlyPrice}
               onClearBuyerStoreFilter={() => setBuyerFilterStoreId(null)}
               onUpdateUserPlan={handleUpdateUserPlan}
               onToggleRestrictUser={handleToggleRestrictUser}
@@ -757,6 +759,7 @@ export function AdminPage() {
               stores={state.stores}
               transactions={transactions}
               paymentMethodLabels={platformPaymentSettings.channels.map((c) => c.label)}
+              proPrice={proMonthlyPrice}
               onToggleTxStatus={(txId, nextStatus) => {
                 const targetTx = transactions.find((t) => t.id === txId);
                 adminToggleSubscriptionTxStatus(txId, nextStatus);
@@ -785,7 +788,9 @@ export function AdminPage() {
           {activeTab === 'payment-settings' && (
             <AdminPaymentSettingsTab
               settings={platformPaymentSettings}
+              proMonthlyPrice={proMonthlyPrice}
               onUpdateSettings={updatePlatformPaymentSettings}
+              onUpdateProPrice={updateProMonthlyPrice}
             />
           )}
 

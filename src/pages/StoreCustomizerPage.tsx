@@ -18,7 +18,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
-import { getPlanLimits } from '../data/plans';
+import { formatPlanPriceLabel, getPlanLimits } from '../data/plans';
 import {
   FREE_TEMPLATE_LIST,
   INDUSTRY_TEMPLATES,
@@ -227,6 +227,7 @@ export function StoreCustomizerPage() {
     updateStoreMeta,
     getStoreProducts,
     getPaymentSettings,
+    proMonthlyPrice,
     pushToast,
   } = useStore();
 
@@ -923,7 +924,7 @@ export function StoreCustomizerPage() {
                   onClick={() => navigate({ name: 'upgrade-plan' })}
                   className="w-full min-h-[36px] px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
                 >
-                  Upgrade to Pro (₱369/mo)
+                  Upgrade to Pro ({formatPlanPriceLabel(proMonthlyPrice)}/mo)
                 </button>
               </div>
             )}

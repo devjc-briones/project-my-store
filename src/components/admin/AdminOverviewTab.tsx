@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 import { Store, SubscriptionTransaction, User } from '../../types/schema';
 import { formatCurrency } from '../../utils/pricing';
-import { PLATFORM_PLANS } from '../../data/plans';
+import { DEFAULT_PRO_MONTHLY_PRICE } from '../../data/plans';
 
 export type AdminTabId =
   | 'overview'
@@ -28,12 +28,11 @@ interface AdminOverviewTabProps {
   transactions: SubscriptionTransaction[];
   ordersCount: number;
   ordersGmv: number;
+  proPrice?: number;
   onNavigateTab: (tab: AdminTabId) => void;
   onQuickUnrestrictUser: (userId: string) => void;
   onQuickUnrestrictStore: (storeId: string) => void;
 }
-
-const PRO_PRICE = PLATFORM_PLANS.find((p) => p.id === 'pro')?.monthlyPrice ?? 369;
 
 function formatShortDate(iso: string): string {
   const date = new Date(iso);
@@ -49,6 +48,7 @@ export function AdminOverviewTab({
   transactions,
   ordersCount,
   ordersGmv,
+  proPrice = DEFAULT_PRO_MONTHLY_PRICE,
   onNavigateTab,
   onQuickUnrestrictUser,
   onQuickUnrestrictStore,
@@ -66,7 +66,7 @@ export function AdminOverviewTab({
   const paidTransactions = transactions.filter((t) => t.status === 'paid');
   const refundedTransactions = transactions.filter((t) => t.status === 'refunded');
   const totalPlanRevenue = paidTransactions.reduce((sum, t) => sum + t.amount, 0);
-  const currentMrr = activeProUsers.length * PRO_PRICE;
+  const currentMrr = activeProUsers.length * proPrice;
   const proSharePercent = users.length > 0 ? Math.round((proUsers.length / users.length) * 100) : 0;
 
   const userById = new Map(users.map((u) => [u.id, u]));
@@ -246,7 +246,7 @@ export function AdminOverviewTab({
             <div>
               <h2 className="text-sm font-bold text-[#0f172a]">Plan Revenue &amp; Tier Mix</h2>
               <p className="text-[11px] text-slate-500 mt-0.5">
-                Income from Pro subscriptions ({formatCurrency(PRO_PRICE, 'PHP')}/mo)
+                Income from Pro subscriptions ({formatCurrency(proPrice, 'PHP')}/mo)
               </p>
             </div>
             <button

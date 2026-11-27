@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { Store, SubscriptionTransaction, User } from '../../types/schema';
 import { formatCurrency } from '../../utils/pricing';
-import { PLATFORM_PLANS } from '../../data/plans';
+import { DEFAULT_PRO_MONTHLY_PRICE } from '../../data/plans';
 import {
   DEFAULT_TABLE_PAGE_SIZE,
   TablePagination,
@@ -25,6 +25,7 @@ interface AdminRevenueTabProps {
   stores: Store[];
   transactions: SubscriptionTransaction[];
   paymentMethodLabels?: string[];
+  proPrice?: number;
   onToggleTxStatus: (txId: string, nextStatus: SubscriptionTransaction['status']) => void;
   onRecordManualProPayment: (
     user: User,
@@ -32,8 +33,6 @@ interface AdminRevenueTabProps {
     status: SubscriptionTransaction['status']
   ) => void;
 }
-
-const PRO_PRICE = PLATFORM_PLANS.find((p) => p.id === 'pro')?.monthlyPrice ?? 369;
 
 function formatDateTime(iso: string): string {
   const date = new Date(iso);
@@ -50,6 +49,7 @@ export function AdminRevenueTab({
   stores,
   transactions,
   paymentMethodLabels,
+  proPrice = DEFAULT_PRO_MONTHLY_PRICE,
   onToggleTxStatus,
   onRecordManualProPayment,
 }: AdminRevenueTabProps) {
@@ -80,21 +80,21 @@ export function AdminRevenueTab({
     const paidTotal = paid.reduce((sum, t) => sum + t.amount, 0);
     const refundedTotal = refunded.reduce((sum, t) => sum + t.amount, 0);
     const activeProCount = users.filter((u) => u.plan === 'pro' && u.status !== 'restricted').length;
-    const mrr = activeProCount * PRO_PRICE;
+    const mrr = activeProCount * proPrice;
     return {
       pendingCount: pending.length,
       duesCount: duesUsers.length,
       paidCount: paid.length,
       refundedCount: refunded.length,
       pendingTotal,
-      duesTotal: duesUsers.length * PRO_PRICE,
+      duesTotal: duesUsers.length * proPrice,
       paidTotal,
       refundedTotal,
       activeProCount,
       mrr,
       duesUsers,
     };
-  }, [transactions, users]);
+  }, [transactions, users, proPrice]);
 
   const filteredTransactions = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -115,7 +115,7 @@ export function AdminRevenueTab({
         userName: u.name,
         userEmail: u.email,
         planId: 'pro',
-        amount: PRO_PRICE,
+        amount: proPrice,
         paymentMethod: 'Unpaid / Overdue',
         status: 'dues',
         createdAt: u.planPeriodEndsAt ?? new Date().toISOString(),
@@ -164,7 +164,7 @@ export function AdminRevenueTab({
       const timeB = new Date(b.approvedAt ?? b.createdAt).getTime();
       return timeB - timeA;
     });
-  }, [transactions, filter, search, stats.duesUsers]);
+  }, [transactions, filter, search, stats.duesUsers, proPrice]);
 
   const txPagination = usePagination(
     filteredTransactions,
@@ -214,7 +214,7 @@ export function AdminRevenueTab({
             {formatCurrency(stats.mrr, 'PHP')}
           </p>
           <p className="text-[11px] text-slate-500 tabular-nums">
-            {stats.activeProCount} Pro × {formatCurrency(PRO_PRICE, 'PHP')}
+            {stats.activeProCount} Pro × {formatCurrency(proPrice, 'PHP')}
           </p>
         </div>
 
@@ -536,7 +536,7 @@ export function AdminRevenueTab({
             <div>
               <h2 className="text-base font-bold text-slate-900">Record Pro Payment</h2>
               <p className="text-xs text-slate-500">
-                Log a {formatCurrency(PRO_PRICE, 'PHP')}/mo billing entry for a merchant
+                Log a {formatCurrency(proPrice, 'PHP')}/mo billing entry for a merchant
               </p>
             </div>
             <button
@@ -615,7 +615,7 @@ export function AdminRevenueTab({
               type="submit"
               className="min-h-[42px] px-4 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl cursor-pointer"
             >
-              Save ({formatCurrency(PRO_PRICE, 'PHP')})
+              Save ({formatCurrency(proPrice, 'PHP')})
             </button>
           </div>
         </form>

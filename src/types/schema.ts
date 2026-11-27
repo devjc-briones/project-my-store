@@ -314,6 +314,7 @@ export interface PlatformPaymentChannel {
 
 export interface PlatformPaymentSettings {
   channels: PlatformPaymentChannel[];
+  proMonthlyPrice?: number;
   updatedAt: string;
 }
 

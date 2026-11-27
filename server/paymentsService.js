@@ -4,6 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 const PLAN_PRICES_PHP = {
   pro: 369,
 };
+const PRO_PLAN_PRICE_ROW_ID = '__pro_plan_price__';
 
 const INTENT_TTL_MS = 30 * 60 * 1000;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -14,6 +15,7 @@ const memoryAlertKeys = new Set();
 const memoryRecentAlerts = [];
 let runtimeActiveEngine =
   process.env.PAYMENT_ENGINE_DEFAULT === 'paymongo' ? 'paymongo' : 'auto_match';
+let runtimeProPlanPrice = PLAN_PRICES_PHP.pro;
 
 function cleanEnvValue(raw) {
   return String(raw || '')
@@ -305,8 +307,64 @@ export async function setActiveGatewayEngine(engine, adminUserId) {
   return runtimeActiveEngine;
 }
 
+export async function getProPlanPricePhp() {
+  const client = getSupabaseAdminClient() || getSupabaseAnonOrScopedClient();
+  if (client) {
+    try {
+      const { data } = await client
+        .from('platform_payment_channels')
+        .select('account_number')
+        .eq('id', PRO_PLAN_PRICE_ROW_ID)
+        .maybeSingle();
+      const parsed = Number(data?.account_number);
+      if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 1_000_000) {
+        runtimeProPlanPrice = roundMoney(parsed);
+      }
+    } catch {
+      // Fallback cleanly to runtimeProPlanPrice
+    }
+  }
+  return runtimeProPlanPrice;
+}
+
+export async function setProPlanPricePhp(price) {
+  const parsed = Number(price);
+  if (!Number.isFinite(parsed) || parsed < 1 || parsed > 1_000_000) {
+    throw new Error('Pro plan price must be between ₱1 and ₱1,000,000.');
+  }
+  const safePrice = roundMoney(parsed);
+  runtimeProPlanPrice = safePrice;
+
+  const adminClient = getSupabaseAdminClient();
+  if (adminClient) {
+    try {
+      await adminClient.from('platform_payment_channels').upsert(
+        {
+          id: PRO_PLAN_PRICE_ROW_ID,
+          channel_type: 'custom',
+          label: 'Pro Plan Monthly Price',
+          subtitle: 'Platform subscription pricing configuration',
+          is_enabled: true,
+          requires_receipt: false,
+          account_name: 'PRO_PLAN_PRICE_PHP',
+          number_label: 'PHP',
+          account_number: String(safePrice),
+          sort_order: 9999,
+        },
+        { onConflict: 'id' }
+      );
+    } catch {
+      // Ignore if table hasn't been migrated yet
+    }
+  }
+  return runtimeProPlanPrice;
+}
+
 export async function getPublicGatewayConfig(baseOrigin = '') {
-  const engine = await getActiveGatewayEngine();
+  const [engine, proPlanPrice] = await Promise.all([
+    getActiveGatewayEngine(),
+    getProPlanPricePhp(),
+  ]);
   const { serviceKey } = getSupabaseServerConfig();
   const paymongoConfigured = Boolean((process.env.PAYMONGO_SECRET_KEY || '').trim());
   const localWebhookConfigured = Boolean((process.env.LOCAL_PAYMENT_WEBHOOK_SECRET || '').trim());
@@ -318,6 +376,7 @@ export async function getPublicGatewayConfig(baseOrigin = '') {
 
   return {
     engine,
+    proPlanPrice,
     zeroReceiptMode: true,
     supportedChannels: ['gcash', 'maya', 'bank', 'qrph'],
     paymongoConfigured,
@@ -691,7 +750,7 @@ export async function createPaymentSession(params) {
 
   if (params.targetType === 'subscription') {
     planId = 'pro';
-    authoritativeAmount = PLAN_PRICES_PHP.pro;
+    authoritativeAmount = await getProPlanPricePhp();
     description = 'mystore Pro Plan (30 Days)';
   } else {
     const rawAmount = Number(params.baseAmount);

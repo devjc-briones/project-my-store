@@ -14,7 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import { BuyerAccount, Roles, Store, SubscriptionTransaction, User } from '../../types/schema';
-import { getPlanLimits, PLATFORM_PLANS } from '../../data/plans';
+import { DEFAULT_PRO_MONTHLY_PRICE, getPlanLimits } from '../../data/plans';
 import { isUserPlanPastDue, isUserPlanUnpaidDue } from '../../utils/billing';
 import {
   DEFAULT_TABLE_PAGE_SIZE,
@@ -32,14 +32,13 @@ interface AdminUsersTabProps {
   transactions: SubscriptionTransaction[];
   currentUserId?: string;
   initialBuyerStoreId?: string | null;
+  proPrice?: number;
   onClearBuyerStoreFilter?: () => void;
   onUpdateUserPlan: (userId: string, nextPlan: 'starter' | 'pro') => void;
   onToggleRestrictUser: (user: User, reason?: string) => void;
   onDeleteUser: (userId: string) => void;
   onViewUserStores: (userId: string) => void;
 }
-
-const PRO_PRICE = PLATFORM_PLANS.find((p) => p.id === 'pro')?.monthlyPrice ?? 369;
 
 function formatDate(iso: string): string {
   const date = new Date(iso);
@@ -54,6 +53,7 @@ export function AdminUsersTab({
   transactions,
   currentUserId,
   initialBuyerStoreId,
+  proPrice = DEFAULT_PRO_MONTHLY_PRICE,
   onClearBuyerStoreFilter,
   onUpdateUserPlan,
   onToggleRestrictUser,
@@ -347,7 +347,7 @@ export function AdminUsersTab({
                           </span>
                           <p className="text-[11px] font-mono tabular-nums text-slate-500 mt-0.5">
                             {user.plan === 'pro'
-                              ? `₱${PRO_PRICE}/mo${user.planPeriodEndsAt ? ` · Due ${formatDate(user.planPeriodEndsAt)}` : ''}`
+                              ? `₱${proPrice}/mo${user.planPeriodEndsAt ? ` · Due ${formatDate(user.planPeriodEndsAt)}` : ''}`
                               : '₱0/mo'}
                           </p>
                         </td>
@@ -493,7 +493,7 @@ export function AdminUsersTab({
 
                   <div className="flex items-center flex-wrap gap-2 text-xs text-slate-600 tabular-nums">
                     <span className="font-semibold text-slate-900">
-                      {limits.label} ({user.plan === 'pro' ? `₱${PRO_PRICE}/mo` : '₱0'})
+                      {limits.label} ({user.plan === 'pro' ? `₱${proPrice}/mo` : '₱0'})
                     </span>
                     {user.plan === 'pro' && user.planPeriodEndsAt && (
                       <>

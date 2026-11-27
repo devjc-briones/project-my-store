@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { DashboardHeader } from '../components/dashboard/DashboardHeader';
 import { useStore } from '../context/StoreContext';
-import { PLATFORM_PLANS, PlanId } from '../data/plans';
+import { getPlatformPlans, PlanId } from '../data/plans';
 import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 import { PlatformPaymentChannel, PlatformPaymentChannelType } from '../types/schema';
 import {
@@ -76,12 +76,14 @@ export function UpgradePlanPage() {
     recordSubscriptionPayment,
     confirmGatewaySubscription,
     platformPaymentSettings,
+    proMonthlyPrice,
     pushToast,
   } = useStore();
   const user = state.currentUser;
   const currentPlanId: PlanId = user?.plan ?? 'starter';
   const isPaidPlan = currentPlanId !== 'starter';
   const isCancellationScheduled = Boolean(isPaidPlan && user?.cancelAtPeriodEnd);
+  const platformPlans = useMemo(() => getPlatformPlans(proMonthlyPrice), [proMonthlyPrice]);
 
   const resolvedPeriodEndsAt = useMemo(() => {
     if (!isPaidPlan) return undefined;
@@ -221,13 +223,13 @@ export function UpgradePlanPage() {
   }, [cancelModalOpen, paymentModalOpen]);
 
   const currentPlan = useMemo(
-    () => PLATFORM_PLANS.find((p) => p.id === currentPlanId) ?? PLATFORM_PLANS[0],
-    [currentPlanId]
+    () => platformPlans.find((p) => p.id === currentPlanId) ?? platformPlans[0],
+    [platformPlans, currentPlanId]
   );
 
   const selectedPlan = useMemo(
-    () => PLATFORM_PLANS.find((p) => p.id === selectedPlanId) ?? PLATFORM_PLANS[1],
-    [selectedPlanId]
+    () => platformPlans.find((p) => p.id === selectedPlanId) ?? platformPlans[1],
+    [platformPlans, selectedPlanId]
   );
 
   useEffect(() => {
@@ -450,7 +452,7 @@ export function UpgradePlanPage() {
       return;
     }
 
-    const targetPlan = PLATFORM_PLANS.find((p) => p.id === planId);
+    const targetPlan = platformPlans.find((p) => p.id === planId);
     if (!targetPlan) return;
 
     if (targetPlan.monthlyPrice === 0) {
@@ -820,7 +822,7 @@ export function UpgradePlanPage() {
         {/* Platform Plans Grid */}
         <section aria-label="Available subscription plans" className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 max-w-4xl gap-5 sm:gap-6">
-            {PLATFORM_PLANS.map((plan) => {
+            {platformPlans.map((plan) => {
               const isCurrent = plan.id === currentPlanId;
               const isDueRenewalCard = isCurrent && isPlanDue;
               const isPendingThisPlan = Boolean(

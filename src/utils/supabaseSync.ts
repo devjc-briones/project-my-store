@@ -395,18 +395,56 @@ export async function syncSubscriptionToSupabase(
   }
 }
 
+export async function syncProPlanPriceToSupabase(price: number): Promise<SyncResult> {
+  if (!isSupabaseConfigured) return { success: false, error: 'Hindi nakakonekta sa Supabase database.' };
+  const client = getSupabaseClient();
+  if (!client) return { success: false, error: 'Database client not initialized.' };
+  const safePrice = Math.round(Number(price) * 100) / 100;
+  if (!Number.isFinite(safePrice) || safePrice <= 0) {
+    return { success: false, error: 'Invalid Pro plan price.' };
+  }
+  try {
+    const { error } = await client.from('platform_payment_channels').upsert(
+      {
+        id: '__pro_plan_price__',
+        channel_type: 'custom',
+        label: 'Pro Plan Monthly Price',
+        subtitle: 'Platform subscription pricing configuration',
+        is_enabled: true,
+        requires_receipt: false,
+        account_name: 'PRO_PLAN_PRICE_PHP',
+        number_label: 'PHP',
+        account_number: String(safePrice),
+        sort_order: 9999,
+      } as any,
+      { onConflict: 'id' }
+    );
+    if (error) {
+      console.error('Supabase pro plan price upsert error:', error.message);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    console.error('Error syncing Pro plan price to Supabase:', err);
+    return { success: false, error: err?.message || 'Unable to save Pro plan price.' };
+  }
+}
+
 export async function syncPlatformChannelsToSupabase(
-  channels: PlatformPaymentChannel[]
+  channels: PlatformPaymentChannel[],
+  proMonthlyPrice?: number
 ): Promise<SyncResult> {
   if (!isSupabaseConfigured) return { success: false, error: 'Hindi nakakonekta sa Supabase database.' };
   const client = getSupabaseClient();
   if (!client) return { success: false, error: 'Database client not initialized.' };
   try {
-    const rows = toDbPlatformChannelRows(channels);
+    const cleanChannels = channels.filter((c) => c.id !== '__pro_plan_price__');
+    const rows = toDbPlatformChannelRows(cleanChannels);
     const { data: existingChannels } = await client
       .from('platform_payment_channels')
       .select('id');
     const keepIds = new Set(rows.map((r) => r.id));
+    keepIds.add('__pro_plan_price__');
     const staleIds = (existingChannels || [])
       .map((c: { id: string }) => c.id)
       .filter((id: string) => !keepIds.has(id));
@@ -431,6 +469,11 @@ export async function syncPlatformChannelsToSupabase(
         return { success: false, error: error.message };
       }
     }
+
+    if (typeof proMonthlyPrice === 'number' && Number.isFinite(proMonthlyPrice) && proMonthlyPrice > 0) {
+      await syncProPlanPriceToSupabase(proMonthlyPrice);
+    }
+
     return { success: true };
   } catch (err: any) {
     console.error('Error syncing platform payment channels to Supabase:', err);

@@ -5,6 +5,7 @@ export type PaymentSessionStatus = 'awaiting_payment' | 'paid' | 'expired' | 'fa
 
 export interface PaymentGatewayPublicConfig {
   engine: PaymentGatewayEngine;
+  proPlanPrice?: number;
   zeroReceiptMode: boolean;
   supportedChannels: string[];
   paymongoConfigured: boolean;
@@ -183,6 +184,31 @@ export async function setAdminGatewayEngine(
   if (!res.ok || !data) {
     throw new Error(
       data?.error || `Could not update payment gateway engine (HTTP ${res.status}).`
+    );
+  }
+  return data;
+}
+
+export async function setAdminProPlanPrice(
+  proPlanPrice: number
+): Promise<{ proPlanPrice: number; config: PaymentGatewayPublicConfig }> {
+  const token = await getAccessToken();
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch('/api/payments/admin/plan-price', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ proPlanPrice }),
+  });
+  const data = await parseResponseJson<{
+    proPlanPrice: number;
+    config: PaymentGatewayPublicConfig;
+    error?: string;
+  }>(res);
+  if (!res.ok || !data) {
+    throw new Error(
+      data?.error || `Could not update Pro plan price (HTTP ${res.status}).`
     );
   }
   return data;

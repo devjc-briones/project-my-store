@@ -24,6 +24,7 @@ import {
 import { AdminModalWrapper } from './AdminModalWrapper';
 import { useStore } from '../../context/StoreContext';
 import { createDefaultPlatformPaymentSettings } from '../../data/platformPayments';
+import { DEFAULT_PRO_MONTHLY_PRICE, formatPlanPriceLabel } from '../../data/plans';
 import {
   PlatformPaymentChannel,
   PlatformPaymentChannelType,
@@ -40,7 +41,9 @@ import { readImageFileAsDataUrl } from '../../utils/paymentQr';
 
 interface AdminPaymentSettingsTabProps {
   settings: PlatformPaymentSettings;
-  onUpdateSettings: (channels: PlatformPaymentChannel[]) => void;
+  proMonthlyPrice?: number;
+  onUpdateSettings: (channels: PlatformPaymentChannel[], nextProPrice?: number) => void;
+  onUpdateProPrice?: (price: number) => Promise<{ success: boolean; error?: string }>;
 }
 
 const CORE_CHANNEL_IDS = new Set(['gcash', 'maya', 'bank']);
@@ -80,10 +83,23 @@ function formatUpdatedAt(iso: string): string {
 
 export function AdminPaymentSettingsTab({
   settings,
+  proMonthlyPrice,
   onUpdateSettings,
+  onUpdateProPrice,
 }: AdminPaymentSettingsTabProps) {
-  const { pushToast } = useStore();
+  const { pushToast, proMonthlyPrice: contextProPrice, updateProMonthlyPrice } = useStore();
   const channels = settings.channels;
+  const activeProPrice =
+    typeof proMonthlyPrice === 'number' && Number.isFinite(proMonthlyPrice) && proMonthlyPrice > 0
+      ? proMonthlyPrice
+      : contextProPrice || DEFAULT_PRO_MONTHLY_PRICE;
+
+  const [priceInput, setPriceInput] = useState<string>(() => String(activeProPrice));
+  const [isSavingPrice, setIsSavingPrice] = useState(false);
+
+  useEffect(() => {
+    setPriceInput(String(activeProPrice));
+  }, [activeProPrice]);
 
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>(() => {
     const initial: Record<string, boolean> = {};
@@ -138,7 +154,7 @@ export function AdminPaymentSettingsTab({
   const [gatewayExpanded, setGatewayExpanded] = useState(false);
   const [simChannel, setSimChannel] = useState<'gcash' | 'maya' | 'bank'>('gcash');
   const [simText, setSimText] = useState(
-    'You have received PHP 369.01 of GCash from JUAN DELA CRUZ with Ref. No. 901234567890.'
+    `You have received PHP ${(activeProPrice + 0.01).toFixed(2)} of GCash from JUAN DELA CRUZ with Ref. No. 901234567890.`
   );
   const [simSending, setSimSending] = useState(false);
 
@@ -330,7 +346,53 @@ export function AdminPaymentSettingsTab({
     });
   };
 
+  const handleSaveProPrice = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (isSavingPrice) return;
+    const parsed = Number(priceInput);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 1_000_000) {
+      pushToast({
+        type: 'error',
+        title: 'Invalid Pro Plan Price',
+        description: 'Enter a valid amount between ₱1 and ₱1,000,000.',
+      });
+      return;
+    }
+
+    const rounded = Math.round(parsed * 100) / 100;
+    setIsSavingPrice(true);
+    try {
+      const saveFn = onUpdateProPrice || updateProMonthlyPrice;
+      const result = await saveFn(rounded);
+      if (!result.success) {
+        pushToast({
+          type: 'error',
+          title: 'Could not save Pro price',
+          description: result.error || 'Failed to update Pro plan price.',
+        });
+        return;
+      }
+      setPriceInput(String(rounded));
+      setSimText(
+        `You have received PHP ${(rounded + 0.01).toFixed(2)} of GCash from JUAN DELA CRUZ with Ref. No. 901234567890.`
+      );
+      pushToast({
+        type: 'success',
+        title: 'Pro Plan price updated',
+        description: `Pro Plan is now ${formatPlanPriceLabel(rounded)}/month across landing, billing, and checkout.`,
+      });
+    } finally {
+      setIsSavingPrice(false);
+    }
+  };
+
   const handleSaveSettings = () => {
+    const parsedPrice = Number(priceInput);
+    const validPrice =
+      Number.isFinite(parsedPrice) && parsedPrice >= 1 && parsedPrice <= 1_000_000
+        ? Math.round(parsedPrice * 100) / 100
+        : undefined;
+
     if (enabledChannels.length === 0) {
       pushToast({
         type: 'error',
@@ -339,7 +401,7 @@ export function AdminPaymentSettingsTab({
       });
       return;
     }
-    onUpdateSettings(channels);
+    onUpdateSettings(channels, validPrice);
     pushToast({
       type: 'success',
       title: 'Payment settings saved',
@@ -459,6 +521,61 @@ export function AdminPaymentSettingsTab({
           </button>
         </div>
       </div>
+
+      {/* Pro Plan Monthly Price Editor */}
+      <form
+        onSubmit={handleSaveProPrice}
+        className="bg-white border border-[#e2e8f0] rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3.5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]"
+      >
+        <div className="space-y-0.5 min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-sm font-bold text-[#0f172a]">Pro Plan Price (Monthly)</h2>
+            <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-800 border border-slate-200 tabular-nums">
+              Current: {formatPlanPriceLabel(activeProPrice)}/mo
+            </span>
+          </div>
+          <p className="text-xs text-slate-500">
+            Sets the monthly Pro subscription price shown on Landing Page, Upgrade Plan, and Checkout.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="relative w-36 sm:w-40">
+            <span
+              aria-hidden="true"
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-mono font-bold text-slate-500 pointer-events-none"
+            >
+              ₱
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={1000000}
+              step="1"
+              inputMode="decimal"
+              aria-label="Pro Plan monthly price in PHP"
+              value={priceInput}
+              onChange={(e) => setPriceInput(e.target.value)}
+              className="w-full min-h-[38px] pl-7 pr-11 py-1.5 text-sm font-mono font-bold text-[#0f172a] bg-slate-50 focus:bg-white border border-[#e2e8f0] rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900 tabular-nums"
+            />
+            <span
+              aria-hidden="true"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-medium text-slate-400 pointer-events-none"
+            >
+              /mo
+            </span>
+          </div>
+
+          <button
+            type="submit"
+            disabled={isSavingPrice}
+            className="inline-flex items-center justify-center gap-1.5 min-h-[38px] px-4 py-2 text-xs font-semibold text-white bg-[#0f172a] hover:bg-slate-800 disabled:opacity-60 rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>{isSavingPrice ? 'Saving...' : 'Save Price'}</span>
+          </button>
+        </div>
+      </form>
 
       {enabledChannels.length === 0 && (
         <div
@@ -739,7 +856,7 @@ export function AdminPaymentSettingsTab({
             <div>
               <h2 className="text-sm font-bold text-[#0f172a]">User Checkout Preview</h2>
               <p className="text-[11px] text-slate-500">
-                Exact view shown to sellers in Subscription Plans &amp; Billing
+                Exact view shown to sellers · Pro {formatPlanPriceLabel(activeProPrice)}/mo
               </p>
             </div>
             <span className="text-[11px] font-mono font-semibold text-slate-500 tabular-nums">

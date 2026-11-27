@@ -22,8 +22,8 @@ import {
   User,
 } from '../types/schema';
 import { INITIAL_SEED_STATE, createDefaultPaymentSettings } from '../data/mockSeed';
-import { createDefaultPlatformPaymentSettings } from '../data/platformPayments';
-import { getPlanLimits } from '../data/plans';
+import { createDefaultPlatformPaymentSettings, PRO_PLAN_PRICE_ROW_ID } from '../data/platformPayments';
+import { DEFAULT_PRO_MONTHLY_PRICE, getPlanLimits } from '../data/plans';
 import { INDUSTRY_TEMPLATES, isProTemplate } from '../data/templates';
 import { resolveTemplateAssetUrl } from '../data/templateAssets';
 import { buildStoreDomainUrl, generateUniqueStoreSlug, validateStoreSlug } from '../utils/domain';
@@ -47,10 +47,12 @@ import {
   syncPaymentSettingsToSupabase,
   syncPlatformChannelsToSupabase,
   syncProductToSupabase,
+  syncProPlanPriceToSupabase,
   syncStoreToSupabase,
   syncSubscriptionToSupabase,
   syncUserToSupabase,
 } from '../utils/supabaseSync';
+import { setAdminProPlanPrice } from '../utils/paymentGateway';
 import { formatAuthError, generateUuid, getSupabaseClient, getSupabaseConfigStatus, isSupabaseConfigured, isUuid } from '../utils/supabaseClient';
 import { AppRoute, buildRoutePath, parseRoute } from '../router/routes';
 
@@ -225,7 +227,9 @@ interface StoreContextValue {
 
   // Platform Subscription Payment Settings (Admin)
   platformPaymentSettings: PlatformPaymentSettings;
-  updatePlatformPaymentSettings: (channels: PlatformPaymentChannel[]) => void;
+  proMonthlyPrice: number;
+  updatePlatformPaymentSettings: (channels: PlatformPaymentChannel[], nextProPrice?: number) => void;
+  updateProMonthlyPrice: (price: number) => Promise<{ success: boolean; error?: string }>;
 
   // Seller notification read/dismiss actions
   markNotificationsRead: (ids: string[]) => void;
@@ -580,20 +584,31 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             };
           });
 
-          const mappedChannels: PlatformPaymentChannel[] = (dbChannels || []).map((ch: any) => ({
-            id: ch.id,
-            type: ch.channel_type || 'ewallet',
-            label: ch.label,
-            subtitle: ch.subtitle || '',
-            enabled: Boolean(ch.is_enabled),
-            requiresReceipt: Boolean(ch.requires_receipt),
-            accountName: ch.account_name,
-            numberLabel: ch.number_label || 'Account Number',
-            accountNumber: ch.account_number,
-            note: ch.note || undefined,
-            qrImageUrl: ch.qr_image_url || undefined,
-            sortOrder: ch.sort_order || 0,
-          }));
+          const proPriceRow = (dbChannels || []).find(
+            (ch: any) => ch.id === PRO_PLAN_PRICE_ROW_ID
+          );
+          const parsedProPrice = Number(proPriceRow?.account_number);
+          const hydratedProPrice =
+            Number.isFinite(parsedProPrice) && parsedProPrice >= 1 && parsedProPrice <= 1_000_000
+              ? Math.round(parsedProPrice * 100) / 100
+              : undefined;
+
+          const mappedChannels: PlatformPaymentChannel[] = (dbChannels || [])
+            .filter((ch: any) => ch.id !== PRO_PLAN_PRICE_ROW_ID)
+            .map((ch: any) => ({
+              id: ch.id,
+              type: ch.channel_type || 'ewallet',
+              label: ch.label,
+              subtitle: ch.subtitle || '',
+              enabled: Boolean(ch.is_enabled),
+              requiresReceipt: Boolean(ch.requires_receipt),
+              accountName: ch.account_name,
+              numberLabel: ch.number_label || 'Account Number',
+              accountNumber: ch.account_number,
+              note: ch.note || undefined,
+              qrImageUrl: ch.qr_image_url || undefined,
+              sortOrder: ch.sort_order || 0,
+            }));
 
           const mappedNotifications: AppNotification[] = (dbNotifications || []).map((n: any) => ({
             id: n.id,
@@ -678,7 +693,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
               placedOrders: mappedOrders,
               subscriptionTransactions: mappedSubs,
               platformPaymentSettings: {
-                channels: mappedChannels.length > 0 ? mappedChannels : (prev.platformPaymentSettings?.channels || []),
+                channels: dbChannels ? mappedChannels : (prev.platformPaymentSettings?.channels || []),
+                proMonthlyPrice:
+                  hydratedProPrice ??
+                  prev.platformPaymentSettings?.proMonthlyPrice ??
+                  DEFAULT_PRO_MONTHLY_PRICE,
                 updatedAt: new Date().toISOString(),
               },
               notifications: mappedNotifications,
@@ -2865,20 +2884,89 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [state.platformPaymentSettings]
   );
 
-  const updatePlatformPaymentSettings = useCallback((channels: PlatformPaymentChannel[]) => {
-    const nowIso = new Date().toISOString();
-    setState((prev) => ({
-      ...prev,
-      platformPaymentSettings: {
-        channels: channels.map((channel, index) => ({
+  const proMonthlyPrice = useMemo<number>(() => {
+    const raw = Number(platformPaymentSettings.proMonthlyPrice);
+    return Number.isFinite(raw) && raw >= 1 && raw <= 1_000_000 ? raw : DEFAULT_PRO_MONTHLY_PRICE;
+  }, [platformPaymentSettings.proMonthlyPrice]);
+
+  const updatePlatformPaymentSettings = useCallback(
+    (channels: PlatformPaymentChannel[], nextProPrice?: number) => {
+      const nowIso = new Date().toISOString();
+      const cleanChannels = channels
+        .filter((c) => c.id !== PRO_PLAN_PRICE_ROW_ID)
+        .map((channel, index) => ({
           ...channel,
           sortOrder: channel.sortOrder ?? index,
-        })),
-        updatedAt: nowIso,
-      },
-    }));
-    notifySync(syncPlatformChannelsToSupabase(channels));
-  }, [notifySync]);
+        }));
+      const resolvedPrice =
+        typeof nextProPrice === 'number' &&
+        Number.isFinite(nextProPrice) &&
+        nextProPrice >= 1 &&
+        nextProPrice <= 1_000_000
+          ? Math.round(nextProPrice * 100) / 100
+          : proMonthlyPrice;
+
+      setState((prev) => ({
+        ...prev,
+        platformPaymentSettings: {
+          channels: cleanChannels,
+          proMonthlyPrice: resolvedPrice,
+          updatedAt: nowIso,
+        },
+      }));
+      notifySync(syncPlatformChannelsToSupabase(cleanChannels, resolvedPrice));
+      if (typeof nextProPrice === 'number' && Number.isFinite(nextProPrice) && nextProPrice >= 1) {
+        setAdminProPlanPrice(resolvedPrice).catch(() => {
+          // Best-effort runtime sync for server session endpoint
+        });
+      }
+    },
+    [notifySync, proMonthlyPrice]
+  );
+
+  const updateProMonthlyPrice = useCallback(
+    async (price: number): Promise<{ success: boolean; error?: string }> => {
+      const parsed = Number(price);
+      if (!Number.isFinite(parsed) || parsed < 1 || parsed > 1_000_000) {
+        return {
+          success: false,
+          error: 'Pro plan price must be between ₱1 and ₱1,000,000.',
+        };
+      }
+      const rounded = Math.round(parsed * 100) / 100;
+      const nowIso = new Date().toISOString();
+
+      setState((prev) => ({
+        ...prev,
+        platformPaymentSettings: {
+          channels: prev.platformPaymentSettings?.channels ?? [],
+          proMonthlyPrice: rounded,
+          updatedAt: nowIso,
+        },
+      }));
+
+      let dbResult: { success: boolean; error?: string } = { success: true };
+      if (isSupabaseConfigured) {
+        dbResult = await syncProPlanPriceToSupabase(rounded);
+      }
+
+      const apiResult = await setAdminProPlanPrice(rounded)
+        .then(() => ({ success: true as const }))
+        .catch((err) => ({
+          success: false as const,
+          error: err instanceof Error ? err.message : 'Unable to sync Pro price with server.',
+        }));
+
+      if (!dbResult.success && !apiResult.success) {
+        return {
+          success: false,
+          error: dbResult.error || apiResult.error || 'Failed to save Pro plan price.',
+        };
+      }
+      return { success: true };
+    },
+    []
+  );
 
   const value = useMemo<StoreContextValue>(
     () => ({
@@ -2927,7 +3015,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       adminToggleSubscriptionTxStatus,
       adminDeleteBuyer,
       platformPaymentSettings,
+      proMonthlyPrice,
       updatePlatformPaymentSettings,
+      updateProMonthlyPrice,
       markNotificationsRead,
       dismissNotifications,
     }),
@@ -2977,7 +3067,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       adminToggleSubscriptionTxStatus,
       adminDeleteBuyer,
       platformPaymentSettings,
+      proMonthlyPrice,
       updatePlatformPaymentSettings,
+      updateProMonthlyPrice,
       markNotificationsRead,
       dismissNotifications,
     ]

@@ -1,9 +1,10 @@
 import { ArrowRight, Check } from 'lucide-react';
 import { useStore } from '../../context/StoreContext';
-import { PLATFORM_PLANS } from '../../data/plans';
+import { getPlatformPlans } from '../../data/plans';
 
 export function PricingAndCtaSection() {
-  const { navigate } = useStore();
+  const { navigate, proMonthlyPrice } = useStore();
+  const plans = getPlatformPlans(proMonthlyPrice);
 
   return (
     <>
@@ -17,7 +18,7 @@ export function PricingAndCtaSection() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 max-w-4xl gap-6">
-            {PLATFORM_PLANS.map((plan) => (
+            {plans.map((plan) => (
               <div
                 key={plan.id}
                 className={`rounded-xl p-6 sm:p-8 flex flex-col justify-between border ${

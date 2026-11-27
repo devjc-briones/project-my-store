@@ -11,6 +11,7 @@ import {
   processPaymongoWebhook,
   sanitizeIntentForClient,
   setActiveGatewayEngine,
+  setProPlanPricePhp,
   verifySupabaseCaller,
 } from './paymentsService.js';
 
@@ -225,6 +226,33 @@ export function createPaymentsApiApp() {
       res.status(200).json({ ok: true, engine, config });
     } catch {
       res.status(500).json({ error: 'Failed to update gateway engine.' });
+    }
+  });
+
+  app.post('/api/payments/admin/plan-price', async (req, res) => {
+    try {
+      const accessToken = extractBearerToken(req.headers.authorization);
+      const adminCheck = await checkAdminAccess(accessToken);
+      if (!adminCheck.allowed) {
+        res.status(403).json({ error: adminCheck.reason || 'Admin privileges required.' });
+        return;
+      }
+
+      const rawPrice = Number(req.body?.proPlanPrice);
+      if (!Number.isFinite(rawPrice) || rawPrice < 1 || rawPrice > 1_000_000) {
+        res.status(400).json({ error: 'Pro plan price must be between ₱1 and ₱1,000,000.' });
+        return;
+      }
+
+      const proPlanPrice = await setProPlanPricePhp(rawPrice);
+      const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+      const host = req.headers['x-forwarded-host'] || req.headers.host || '';
+      const config = await getPublicGatewayConfig(host ? `${proto}://${host}` : '');
+      res.status(200).json({ ok: true, proPlanPrice, config });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to update Pro plan price.',
+      });
     }
   });
 
