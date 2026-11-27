@@ -466,6 +466,18 @@ export function StoreCustomizerPage() {
     };
   }, []);
 
+  const storeProducts = useMemo(
+    () => (existingStore ? getStoreProducts(existingStore.id) : []),
+    [existingStore, getStoreProducts]
+  );
+
+  const currency = existingStore ? getPaymentSettings(existingStore.id).currency : 'PHP';
+
+  const slugValidation = useMemo(
+    () => validateStoreSlug(draftStore.slug, existingSlugs, existingStore?.slug),
+    [draftStore.slug, existingSlugs, existingStore?.slug]
+  );
+
   // Guard against invalid store ID in /store/:storeId/customize
   if (!isCreateMode && !existingStore) {
     return (
@@ -490,18 +502,6 @@ export function StoreCustomizerPage() {
       </div>
     );
   }
-
-  const storeProducts = useMemo(
-    () => (existingStore ? getStoreProducts(existingStore.id) : []),
-    [existingStore, getStoreProducts]
-  );
-
-  const currency = existingStore ? getPaymentSettings(existingStore.id).currency : 'PHP';
-
-  const slugValidation = useMemo(
-    () => validateStoreSlug(draftStore.slug, existingSlugs, existingStore?.slug),
-    [draftStore.slug, existingSlugs, existingStore?.slug]
-  );
 
   const planLimits = getPlanLimits(state.currentUser?.plan ?? 'starter');
   const ownerId = state.currentUser?.id ?? '';

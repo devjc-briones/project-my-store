@@ -129,9 +129,9 @@ export function PublicStorefrontPage() {
             ) : (
               <div
                 className="w-8 h-8 rounded-lg flex items-center justify-center text-white text-xs font-bold shrink-0"
-                style={{ backgroundColor: store.branding.primaryColor }}
+                style={{ backgroundColor: store.branding?.primaryColor || '#0f172a' }}
               >
-                {store.name.trim().charAt(0).toUpperCase()}
+                {(store.name ?? '').trim().charAt(0).toUpperCase() || 'S'}
               </div>
             )}
             <span className="text-sm font-bold text-slate-900 truncate">{store.name}</span>

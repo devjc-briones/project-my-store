@@ -49,10 +49,10 @@ export function AdminOrdersBuyersTab({
     if (!q) return orders;
     return orders.filter(
       (o) =>
-        o.id.toLowerCase().includes(q) ||
-        o.customerName.toLowerCase().includes(q) ||
+        (o.id ?? '').toLowerCase().includes(q) ||
+        (o.customerName ?? '').toLowerCase().includes(q) ||
         (o.storeName ?? '').toLowerCase().includes(q) ||
-        o.phoneNumber.toLowerCase().includes(q)
+        (o.phoneNumber ?? '').toLowerCase().includes(q)
     );
   }, [orders, search]);
 
@@ -61,8 +61,8 @@ export function AdminOrdersBuyersTab({
     if (!q) return buyers;
     return buyers.filter(
       (b) =>
-        b.name.toLowerCase().includes(q) ||
-        b.email.toLowerCase().includes(q) ||
+        (b.name ?? '').toLowerCase().includes(q) ||
+        (b.email ?? '').toLowerCase().includes(q) ||
         (b.storeName ?? '').toLowerCase().includes(q)
     );
   }, [buyers, search]);

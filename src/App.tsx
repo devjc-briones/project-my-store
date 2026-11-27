@@ -16,12 +16,16 @@ import { UpgradePlanPage } from './pages/UpgradePlanPage';
 import { AdminPage } from './pages/AdminPage';
 import { PageLoader } from './components/common/PageLoader';
 import { ToastContainer } from './components/common/ToastContainer';
+import { AppErrorBoundary } from './components/common/AppErrorBoundary';
 
 function AppRouter() {
   const { route, state, isAuthChecking, navigate } = useStore();
 
   useEffect(() => {
-    if ((route.name === 'landing' || route.name === 'login') && state.currentUser) {
+    if (
+      (route.name === 'landing' || route.name === 'login' || route.name === 'not-found') &&
+      state.currentUser
+    ) {
       if (state.currentUser.role === Roles.Admin) {
         navigate({ name: 'admin' }, { replace: true });
       } else if (state.currentUser.role === Roles.Seller) {
@@ -102,9 +106,13 @@ function AppRouter() {
 
 export default function App() {
   return (
-    <StoreProvider>
-      <AppRouter />
-      <ToastContainer />
-    </StoreProvider>
+    <AppErrorBoundary>
+      <StoreProvider>
+        <AppErrorBoundary>
+          <AppRouter />
+        </AppErrorBoundary>
+        <ToastContainer />
+      </StoreProvider>
+    </AppErrorBoundary>
   );
 }

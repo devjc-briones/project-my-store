@@ -61,6 +61,35 @@ const STORAGE_KEY = 'mystore_saas_state_v2';
 const NOTIF_STATE_STORAGE_PREFIX = 'mystore_notif_state_v1:';
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+function resolveUserRole(u: any): { role: Roles; roleId: 1 | 2 | 3 } {
+  const numRoleId = Number(u?.role_id);
+  if (numRoleId === 1) return { role: Roles.Admin, roleId: 1 };
+  if (numRoleId === 2) return { role: Roles.Seller, roleId: 2 };
+  if (numRoleId === 3) return { role: Roles.Buyer, roleId: 3 };
+
+  const textRole = String(u?.role ?? u?.account_type ?? '').trim().toLowerCase();
+  if (textRole === 'admin' || textRole === 'superadmin' || textRole === 'super_admin') {
+    return { role: Roles.Admin, roleId: 1 };
+  }
+  if (textRole === 'seller' || textRole === 'merchant') {
+    return { role: Roles.Seller, roleId: 2 };
+  }
+  if (textRole === 'buyer' || textRole === 'customer') {
+    return { role: Roles.Buyer, roleId: 3 };
+  }
+  if (u?.registered_store_id) {
+    return { role: Roles.Buyer, roleId: 3 };
+  }
+  return { role: Roles.Buyer, roleId: 3 };
+}
+
+function resolveTemplateId(raw: unknown): IndustryTemplateId {
+  if (typeof raw === 'string' && raw in INDUSTRY_TEMPLATES) {
+    return raw as IndustryTemplateId;
+  }
+  return 'food-restaurant';
+}
+
 interface LocalNotificationState {
   readIds: string[];
   dismissedIds: string[];
@@ -325,6 +354,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const activeUserIdRef = useRef<string | null>(null);
   activeUserIdRef.current = state.currentUser?.id ?? state.currentBuyer?.id ?? null;
 
+  // Sync route on browser Back/Forward navigation
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handlePopState = () => {
+      setRoute(parseRoute(window.location.pathname, window.location.search));
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
   // Hydrate state from Supabase on mount if configured
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -338,6 +377,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setIsAuthChecking(false);
       return;
     }
+
+    const authSafetyTimer =
+      typeof window !== 'undefined'
+        ? window.setTimeout(() => {
+            if (isInitialHydrationRef.current) {
+              isInitialHydrationRef.current = false;
+              setIsAuthChecking(false);
+              setIsHydrating(false);
+            }
+          }, 12000)
+        : undefined;
 
     async function hydrateFromSupabase(explicitSession?: any) {
       try {
@@ -428,67 +478,78 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           dbNotifStates = notifStatesRes.error ? null : notifStatesRes.data;
         }
 
-        const mappedUsers: User[] = (dbUsers || []).map((u: any) => ({
-          id: u.id,
-          name: u.name,
-          email: u.email,
-          role: u.role_id === 1 ? Roles.Admin : u.role_id === 2 ? Roles.Seller : Roles.Buyer,
-          roleId: u.role_id,
-          plan: u.plan || 'starter',
-          status: u.status || 'active',
-          restrictedReason: u.restricted_reason || undefined,
-          cancelAtPeriodEnd: u.cancel_at_period_end || false,
-          planPeriodEndsAt: u.plan_period_ends_at || undefined,
-          phoneNumber: u.phone_number || undefined,
-          address: u.address || undefined,
-          deliveryNotes: u.delivery_notes || undefined,
-          preferredPaymentMethod: u.preferred_payment_method || undefined,
-          checkoutInfoUpdatedAt: u.checkout_info_updated_at || undefined,
-          registeredStoreId: u.registered_store_id || undefined,
-          lastActiveAt: u.last_active_at || u.created_at,
-          createdAt: u.created_at,
-          updatedAt: u.updated_at,
-        }));
+        const mappedUsers: User[] = (dbUsers || []).map((u: any) => {
+          const resolvedRole = resolveUserRole(u);
+          return {
+            id: u.id,
+            name: typeof u.name === 'string' && u.name.trim() ? u.name : (u.email || 'User'),
+            email: typeof u.email === 'string' ? u.email : '',
+            role: resolvedRole.role,
+            roleId: resolvedRole.roleId,
+            plan: u.plan === 'pro' ? 'pro' : 'starter',
+            status: u.status === 'restricted' ? 'restricted' : 'active',
+            restrictedReason: u.restricted_reason || undefined,
+            cancelAtPeriodEnd: Boolean(u.cancel_at_period_end),
+            planPeriodEndsAt: u.plan_period_ends_at || undefined,
+            phoneNumber: u.phone_number || undefined,
+            address: u.address || undefined,
+            deliveryNotes: u.delivery_notes || undefined,
+            preferredPaymentMethod: u.preferred_payment_method || undefined,
+            checkoutInfoUpdatedAt: u.checkout_info_updated_at || undefined,
+            registeredStoreId: u.registered_store_id || undefined,
+            lastActiveAt: u.last_active_at || u.created_at || new Date().toISOString(),
+            createdAt: u.created_at || new Date().toISOString(),
+            updatedAt: u.updated_at || undefined,
+          };
+        });
 
-        const mappedStores: Store[] = (dbStores || []).map((s: any) => ({
-            id: s.id,
-            ownerId: s.user_id,
-            name: s.name,
-            slug: s.slug,
-            domainUrl: buildStoreDomainUrl(s.slug),
-            templateId: s.template_id,
-            status: s.status,
-            restrictedReason: s.restricted_reason || undefined,
-            branding: {
-              primaryColor: s.primary_color,
-              secondaryColor: s.secondary_color,
-              accentColor: s.accent_color,
-              surfaceColor: s.surface_color,
-              textColor: s.text_color,
-              backgroundMode: s.background_mode,
-              buttonStyle: s.button_style,
-              fontPairing: s.font_pairing,
-              logoText: s.logo_text,
-              logoImageUrl: s.logo_image_url || undefined,
-              heroTitle: s.hero_title,
-              heroSubtitle: s.hero_subtitle,
-              heroCtaLabel: s.hero_cta_label,
-              heroBannerUrl: s.hero_banner_url || undefined,
-              bio: s.bio,
-              announcementEnabled: s.announcement_enabled,
-              announcementText: s.announcement_text,
-              address: s.contact_address || undefined,
-              contactNumber: s.contact_number || undefined,
-              socialLinks: {
-                instagram: s.social_instagram || undefined,
-                facebook: s.social_facebook || undefined,
-                tiktok: s.social_tiktok || undefined,
-                website: s.social_website || undefined,
+        const mappedStores: Store[] = (dbStores || []).map((s: any) => {
+            const safeTemplateId = resolveTemplateId(s.template_id);
+            const fallbackBranding = INDUSTRY_TEMPLATES[safeTemplateId].defaultBranding;
+            const safeName = typeof s.name === 'string' && s.name.trim() ? s.name : 'Untitled Store';
+            const safeSlug = typeof s.slug === 'string' ? s.slug : '';
+            const safeStatus: Store['status'] =
+              s.status === 'published' || s.status === 'restricted' ? s.status : 'draft';
+            return {
+              id: s.id,
+              ownerId: s.user_id || '',
+              name: safeName,
+              slug: safeSlug,
+              domainUrl: buildStoreDomainUrl(safeSlug),
+              templateId: safeTemplateId,
+              status: safeStatus,
+              restrictedReason: s.restricted_reason || undefined,
+              branding: {
+                primaryColor: s.primary_color || fallbackBranding.primaryColor,
+                secondaryColor: s.secondary_color || fallbackBranding.secondaryColor,
+                accentColor: s.accent_color || fallbackBranding.accentColor,
+                surfaceColor: s.surface_color || fallbackBranding.surfaceColor,
+                textColor: s.text_color || fallbackBranding.textColor,
+                backgroundMode: s.background_mode || fallbackBranding.backgroundMode,
+                buttonStyle: s.button_style || fallbackBranding.buttonStyle,
+                fontPairing: s.font_pairing || fallbackBranding.fontPairing,
+                logoText: s.logo_text ?? safeName,
+                logoImageUrl: s.logo_image_url || undefined,
+                heroTitle: s.hero_title ?? safeName,
+                heroSubtitle: s.hero_subtitle ?? '',
+                heroCtaLabel: s.hero_cta_label || 'Shop Now',
+                heroBannerUrl: s.hero_banner_url || undefined,
+                bio: s.bio ?? '',
+                announcementEnabled: Boolean(s.announcement_enabled),
+                announcementText: s.announcement_text ?? '',
+                address: s.contact_address || undefined,
+                contactNumber: s.contact_number || undefined,
+                socialLinks: {
+                  instagram: s.social_instagram || undefined,
+                  facebook: s.social_facebook || undefined,
+                  tiktok: s.social_tiktok || undefined,
+                  website: s.social_website || undefined,
+                },
               },
-            },
-            createdAt: s.created_at,
-            updatedAt: s.updated_at,
-          }));
+              createdAt: s.created_at || new Date().toISOString(),
+              updatedAt: s.updated_at || s.created_at || new Date().toISOString(),
+            };
+          });
 
           const variantsMap = new Map<string, any[]>();
           (dbVariants || []).forEach((v: any) => {
@@ -496,37 +557,37 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             list.push({
               id: v.id,
               productId: v.product_id,
-              label: v.label,
-              attributeName: v.attribute_name,
-              value: v.value,
+              label: v.label || '',
+              attributeName: v.attribute_name || 'Option',
+              value: v.value || '',
               priceDelta: Number(v.price_delta || 0),
-              stock: v.stock,
+              stock: Number.isFinite(Number(v.stock)) ? Number(v.stock) : 0,
               sku: v.sku || undefined,
-              sortOrder: v.sort_order,
+              sortOrder: v.sort_order ?? 0,
             });
             variantsMap.set(v.product_id, list);
           });
 
           const mappedProducts: Product[] = (dbProducts || []).map((p: any) => ({
             id: p.id,
-            storeId: p.store_id,
-            name: p.name,
-            description: p.description,
-            category: p.category,
-            sku: p.sku,
+            storeId: p.store_id || '',
+            name: typeof p.name === 'string' && p.name.trim() ? p.name : 'Untitled Product',
+            description: typeof p.description === 'string' ? p.description : '',
+            category: typeof p.category === 'string' && p.category.trim() ? p.category : 'General',
+            sku: typeof p.sku === 'string' ? p.sku : '',
             basePrice: Number(p.base_price || 0),
-            discountType: p.discount_type,
+            discountType: p.discount_type || 'none',
             discountValue: Number(p.discount_value || 0),
             discountPercent: Number(p.discount_percent || 0),
             costPrice: p.cost_price != null ? Number(p.cost_price) : undefined,
             finalPrice: Number(p.final_price || p.base_price || 0),
-            stock: p.stock,
+            stock: Number.isFinite(Number(p.stock)) ? Number(p.stock) : 0,
             imageUrl: p.image_url || undefined,
             variants: variantsMap.get(p.id) || [],
-            isFeatured: p.is_featured,
-            isAvailable: p.is_available,
-            createdAt: p.created_at,
-            updatedAt: p.updated_at,
+            isFeatured: Boolean(p.is_featured),
+            isAvailable: p.is_available !== false,
+            createdAt: p.created_at || new Date().toISOString(),
+            updatedAt: p.updated_at || p.created_at || new Date().toISOString(),
           }));
 
           const paymentSettingsByStore: Record<string, PaymentSettings> = {};
@@ -608,11 +669,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             return {
               id: o.order_code || o.id,
               dbId: o.id,
-              storeId: o.store_id,
+              storeId: o.store_id || '',
               buyerId: o.user_id || undefined,
-              customerName: o.customer_name,
-              phoneNumber: o.phone_number,
-              deliveryAddress: o.delivery_address,
+              customerName: typeof o.customer_name === 'string' ? o.customer_name : 'Customer',
+              phoneNumber: typeof o.phone_number === 'string' ? o.phone_number : '',
+              deliveryAddress: typeof o.delivery_address === 'string' ? o.delivery_address : '',
               notes: o.notes || undefined,
               items: itemsMap.get(o.id) || [],
               currency: o.currency || 'PHP',
@@ -627,35 +688,40 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
               paymentReferenceNumber: payInfo.reference_number || undefined,
               paymentProofUrl: payInfo.payment_proof_url || undefined,
               amountPaid: Number(payInfo.amount_paid || 0),
-              status: o.status,
-              createdAt: o.created_at,
-              updatedAt: o.updated_at,
+              status: o.status || 'pending',
+              createdAt: o.created_at || new Date().toISOString(),
+              updatedAt: o.updated_at || o.created_at || new Date().toISOString(),
             };
           });
 
           const userEmailMap = new Map<string, { name: string; email: string }>();
-          (dbUsers || []).forEach((u: any) => userEmailMap.set(u.id, { name: u.name, email: u.email }));
+          (dbUsers || []).forEach((u: any) =>
+            userEmailMap.set(u.id, {
+              name: typeof u.name === 'string' && u.name.trim() ? u.name : 'Merchant',
+              email: typeof u.email === 'string' ? u.email : '',
+            })
+          );
 
           const mappedSubs: SubscriptionTransaction[] = (dbSubs || []).map((sub: any) => {
             const uInfo = userEmailMap.get(sub.user_id) || { name: 'Merchant', email: '' };
             return {
               id: sub.id,
-              referenceId: sub.reference_id,
-              userId: sub.user_id,
+              referenceId: sub.reference_id || sub.id || '',
+              userId: sub.user_id || '',
               userName: uInfo.name,
               userEmail: uInfo.email,
-              planId: sub.plan_id,
+              planId: sub.plan_id === 'starter' ? 'starter' : 'pro',
               amount: Number(sub.amount || 0),
-              paymentMethod: sub.payment_method,
-              status: sub.status,
+              paymentMethod: sub.payment_method || 'GCash',
+              status: sub.status || 'pending',
               dueDate: sub.due_date || undefined,
               periodStart: sub.period_start || undefined,
               periodEnd: sub.period_end || undefined,
               proofUrl: sub.proof_url || undefined,
               approvedBy: sub.approved_by || undefined,
               approvedAt: sub.approved_at || undefined,
-              createdAt: sub.created_at,
-              updatedAt: sub.updated_at,
+              createdAt: sub.created_at || new Date().toISOString(),
+              updatedAt: sub.updated_at || undefined,
             };
           });
 
@@ -673,13 +739,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             .map((ch: any) => ({
               id: ch.id,
               type: ch.channel_type || 'ewallet',
-              label: ch.label,
+              label: ch.label || 'Payment Channel',
               subtitle: ch.subtitle || '',
               enabled: Boolean(ch.is_enabled),
               requiresReceipt: Boolean(ch.requires_receipt),
-              accountName: ch.account_name,
+              accountName: ch.account_name || '',
               numberLabel: ch.number_label || 'Account Number',
-              accountNumber: ch.account_number,
+              accountNumber: ch.account_number || '',
               note: ch.note || undefined,
               qrImageUrl: ch.qr_image_url || undefined,
               sortOrder: ch.sort_order || 0,
@@ -687,45 +753,45 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
           const mappedNotifications: AppNotification[] = (dbNotifications || []).map((n: any) => ({
             id: n.id,
-            userId: n.user_id,
+            userId: n.user_id || '',
             storeId: n.store_id || undefined,
             orderId: n.order_id || undefined,
             subscriptionId: n.subscription_id || undefined,
             notificationKey: n.notification_key || undefined,
-            category: n.category,
-            title: n.title,
-            message: n.message,
-            targetPath: n.target_path,
+            category: n.category || 'system',
+            title: n.title || '',
+            message: n.message || '',
+            targetPath: n.target_path || '/dashboard',
             isRead: Boolean(n.is_read),
             readAt: n.read_at || undefined,
             isDismissed: Boolean(n.is_dismissed),
             dismissedAt: n.dismissed_at || undefined,
-            createdAt: n.created_at,
-            updatedAt: n.updated_at,
+            createdAt: n.created_at || new Date().toISOString(),
+            updatedAt: n.updated_at || undefined,
           }));
 
           const mappedBuyers: BuyerAccount[] = (dbUsers || [])
-            .filter((u: any) => u.role_id === 3)
+            .filter((u: any) => resolveUserRole(u).role === Roles.Buyer)
             .map((u: any) => ({
               id: u.id,
-              name: u.name,
-              email: u.email,
+              name: typeof u.name === 'string' && u.name.trim() ? u.name : (u.email || 'Customer'),
+              email: typeof u.email === 'string' ? u.email : '',
               role: Roles.Buyer,
               roleId: 3 as const,
               storeId: u.registered_store_id || undefined,
               savedCheckoutInfo:
                 u.phone_number || u.address
                   ? {
-                      fullName: u.name,
+                      fullName: u.name || 'Customer',
                       phoneNumber: u.phone_number || '',
                       deliveryAddress: u.address || '',
                       notes: u.delivery_notes || undefined,
                       preferredPaymentMethod: u.preferred_payment_method || undefined,
-                      updatedAt: u.checkout_info_updated_at || u.updated_at || u.created_at,
+                      updatedAt: u.checkout_info_updated_at || u.updated_at || u.created_at || new Date().toISOString(),
                     }
                   : undefined,
-              createdAt: u.created_at,
-              updatedAt: u.updated_at,
+              createdAt: u.created_at || new Date().toISOString(),
+              updatedAt: u.updated_at || undefined,
             }));
 
           const { data: latestSessionData } = await client!.auth.getSession();
@@ -734,12 +800,72 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             return;
           }
 
-          const currentSessionUser = sessionUserId
+          let currentSessionUser = sessionUserId
             ? mappedUsers.find((u) => u.id === sessionUserId) || null
             : null;
-          const currentSessionBuyer = sessionUserId
+          let currentSessionBuyer = sessionUserId
             ? mappedBuyers.find((b) => b.id === sessionUserId) || null
             : null;
+
+          // If Supabase Auth has an active session for a seller/admin whose public.users row is missing
+          // or temporarily unreadable (e.g., RLS / replication delay), construct a resilient session profile
+          // so reloading never logs them out onto the landing page.
+          let fallbackAuthUser: User | null = null;
+          let fallbackAuthBuyer: BuyerAccount | null = null;
+          if (hasSession && sessionUserId && !currentSessionUser && !currentSessionBuyer && activeSession?.user) {
+            const authUser = activeSession.user;
+            const metaRole = resolveUserRole({
+              role_id: authUser.app_metadata?.role_id ?? authUser.user_metadata?.role_id,
+              role: authUser.app_metadata?.role ?? authUser.user_metadata?.role,
+              account_type: authUser.user_metadata?.account_type,
+              registered_store_id: authUser.user_metadata?.registered_store_id,
+            });
+            const isExplicitBuyer =
+              authUser.user_metadata?.account_type === 'buyer' ||
+              Boolean(authUser.user_metadata?.registered_store_id) ||
+              (authUser.user_metadata?.role === 'buyer' || authUser.app_metadata?.role === 'buyer');
+            const emailStr = typeof authUser.email === 'string' ? authUser.email : '';
+            const displayName =
+              (typeof authUser.user_metadata?.name === 'string' && authUser.user_metadata.name.trim()) ||
+              (emailStr ? emailStr.split('@')[0] : 'Merchant');
+            const nowIso = new Date().toISOString();
+
+            if (isExplicitBuyer) {
+              fallbackAuthBuyer = {
+                id: sessionUserId,
+                name: displayName,
+                email: emailStr,
+                role: Roles.Buyer,
+                roleId: 3,
+                storeId: authUser.user_metadata?.registered_store_id || undefined,
+                createdAt: authUser.created_at || nowIso,
+                updatedAt: nowIso,
+              };
+            } else {
+              const resolvedFallbackRole =
+                metaRole.role === Roles.Admin ? Roles.Admin : Roles.Seller;
+              const resolvedFallbackRoleId: 1 | 2 = resolvedFallbackRole === Roles.Admin ? 1 : 2;
+              fallbackAuthUser = {
+                id: sessionUserId,
+                name: displayName,
+                email: emailStr,
+                role: resolvedFallbackRole,
+                roleId: resolvedFallbackRoleId,
+                plan: resolvedFallbackRole === Roles.Admin ? 'pro' : 'starter',
+                status: 'active',
+                lastActiveAt: nowIso,
+                createdAt: authUser.created_at || nowIso,
+                updatedAt: nowIso,
+              };
+
+              if (!usersFetchFailed && resolvedFallbackRole === Roles.Seller) {
+                client!
+                  .from('users')
+                  .upsert(toDbUserRow(fallbackAuthUser) as any, { onConflict: 'id' })
+                  .then();
+              }
+            }
+          }
 
           setState((prev) => {
             let nextCurrentUser: User | null = null;
@@ -748,14 +874,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                 currentSessionUser.role === Roles.Admin || currentSessionUser.role === Roles.Seller
                   ? currentSessionUser
                   : null;
-            } else if (hasSession && sessionUserId && usersFetchFailed && prev.currentUser?.id === sessionUserId) {
-              // Preserve active signed-in user if users table read had a transient/RLS issue
+            } else if (hasSession && sessionUserId && prev.currentUser?.id === sessionUserId) {
               nextCurrentUser = prev.currentUser;
+            } else if (fallbackAuthUser) {
+              nextCurrentUser = fallbackAuthUser;
             }
 
             let nextCurrentBuyer: BuyerAccount | null = currentSessionBuyer;
-            if (!nextCurrentBuyer && hasSession && sessionUserId && usersFetchFailed && prev.currentBuyer?.id === sessionUserId) {
+            if (!nextCurrentBuyer && hasSession && sessionUserId && prev.currentBuyer?.id === sessionUserId) {
               nextCurrentBuyer = prev.currentBuyer;
+            } else if (!nextCurrentBuyer && fallbackAuthBuyer) {
+              nextCurrentBuyer = fallbackAuthBuyer;
             }
 
             const resolvedUserId =
@@ -837,6 +966,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         } finally {
           if (isInitialHydrationRef.current) {
             isInitialHydrationRef.current = false;
+            if (authSafetyTimer !== undefined && typeof window !== 'undefined') {
+              window.clearTimeout(authSafetyTimer);
+            }
             setIsAuthChecking(false);
             setIsHydrating(false);
           }
@@ -878,13 +1010,21 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             placedOrders: [],
             subscriptionTransactions: [],
           }));
-        } else if (event === 'SIGNED_IN') {
+        } else if (
+          event === 'SIGNED_IN' ||
+          event === 'TOKEN_REFRESHED' ||
+          event === 'USER_UPDATED' ||
+          (event === 'INITIAL_SESSION' && session && !activeUserIdRef.current)
+        ) {
           lastHydrateAt = Date.now();
           hydrateFromSupabase(session);
         }
       });
 
       return () => {
+        if (authSafetyTimer !== undefined && typeof window !== 'undefined') {
+          window.clearTimeout(authSafetyTimer);
+        }
         hydrateSessionRef.current = null;
         authListener?.subscription?.unsubscribe();
         if (typeof window !== 'undefined') {
@@ -1057,10 +1197,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           if (authData.session) {
             const { data: existingRow } = await client
               .from('users')
-              .select('role_id')
+              .select('role_id, role')
               .eq('id', authId)
               .maybeSingle();
-            if (existingRow && existingRow.role_id !== 2) {
+            if (existingRow && resolveUserRole(existingRow).role !== Roles.Seller) {
               await client.auth.signOut();
               return {
                 success: false,
@@ -1237,7 +1377,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           }
         }
 
-        if (!resolvedRow || (resolvedRow.role_id !== 1 && resolvedRow.role_id !== 2)) {
+        const resolvedSignInRole = resolvedRow ? resolveUserRole(resolvedRow) : null;
+        if (!resolvedRow || !resolvedSignInRole || (resolvedSignInRole.role !== Roles.Admin && resolvedSignInRole.role !== Roles.Seller)) {
           await client.auth.signOut();
           setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
           return {
@@ -1251,8 +1392,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           id: resolvedRow.id,
           name: resolvedRow.name || authData.user.user_metadata?.name || normalizedEmail.split('@')[0],
           email: resolvedRow.email || normalizedEmail,
-          role: resolvedRow.role_id === 1 ? Roles.Admin : Roles.Seller,
-          roleId: resolvedRow.role_id,
+          role: resolvedSignInRole.role,
+          roleId: resolvedSignInRole.roleId,
           plan: resolvedRow.plan || 'starter',
           status: resolvedRow.status || 'active',
           restrictedReason: resolvedRow.restricted_reason || undefined,
@@ -1349,8 +1490,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           return { success: false, error: `Database Error: ${dbErr.message}`, isSystemError: true };
         }
 
-        if (!dbUser || dbUser.role_id !== 1) {
-          const isBuyerRole = dbUser?.role_id === 3 || authData.user.user_metadata?.account_type === 'buyer';
+        const resolvedAdminRole = dbUser ? resolveUserRole(dbUser) : null;
+        if (!dbUser || resolvedAdminRole?.role !== Roles.Admin) {
+          const isBuyerRole =
+            resolvedAdminRole?.role === Roles.Buyer ||
+            authData.user.user_metadata?.account_type === 'buyer';
           await client.auth.signOut();
           setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
           return {
@@ -1544,10 +1688,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           if (authData.session) {
             const { data: existingRow } = await client
               .from('users')
-              .select('role_id')
+              .select('role_id, role')
               .eq('id', authId)
               .maybeSingle();
-            if (existingRow && existingRow.role_id !== 3) {
+            if (existingRow && resolveUserRole(existingRow).role !== Roles.Buyer) {
               await client.auth.signOut();
               setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
               return {
@@ -1718,8 +1862,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           }
         }
 
-        // Strict role enforcement: storefront customer login only allows role_id === 3 (Buyer)
-        if (!activeDbBuyer || activeDbBuyer.role_id !== 3) {
+        // Strict role enforcement: storefront customer login only allows Buyer role
+        if (!activeDbBuyer || resolveUserRole(activeDbBuyer).role !== Roles.Buyer) {
           await client.auth.signOut();
           setState((prev) => ({ ...prev, currentUser: null, currentBuyer: null }));
           return {

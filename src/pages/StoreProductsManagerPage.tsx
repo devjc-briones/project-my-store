@@ -256,9 +256,9 @@ export function StoreProductsManagerPage() {
       if (stockFilter === 'sold-out' && prd.isAvailable) return false;
       if (
         q &&
-        !prd.name.toLowerCase().includes(q) &&
-        !prd.sku.toLowerCase().includes(q) &&
-        !prd.category.toLowerCase().includes(q)
+        !(prd.name ?? '').toLowerCase().includes(q) &&
+        !(prd.sku ?? '').toLowerCase().includes(q) &&
+        !(prd.category ?? '').toLowerCase().includes(q)
       ) {
         return false;
       }
@@ -295,9 +295,11 @@ export function StoreProductsManagerPage() {
 
   const effectiveTab: ManagerTab =
     store.status !== 'published' && activeTab === 'overview' ? 'products' : activeTab;
-  const templateMeta = INDUSTRY_TEMPLATES[store.templateId];
-  const fallbackImage = TEMPLATE_SHOWCASE_MEDIA[store.templateId].imageUrl;
-  const shopPath = buildRoutePath({ name: 'storefront', storeSlug: store.slug });
+  const templateMeta =
+    INDUSTRY_TEMPLATES[store.templateId] ?? INDUSTRY_TEMPLATES['food-restaurant'];
+  const fallbackImage =
+    (TEMPLATE_SHOWCASE_MEDIA[store.templateId] ?? TEMPLATE_SHOWCASE_MEDIA['food-restaurant']).imageUrl;
+  const shopPath = buildRoutePath({ name: 'storefront', storeSlug: store.slug ?? '' });
 
   const handleOpenAddProduct = () => {
     const limits = getPlanLimits(state.currentUser?.plan ?? 'starter');

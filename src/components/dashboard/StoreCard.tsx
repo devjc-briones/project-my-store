@@ -36,9 +36,12 @@ export function StoreCard({ store, onDeleteRequest }: StoreCardProps) {
 
   const products = getStoreProducts(store.id);
   const availableCount = products.filter((p) => p.isAvailable).length;
-  const templateMeta = INDUSTRY_TEMPLATES[store.templateId];
-  const fallbackMedia = TEMPLATE_SHOWCASE_MEDIA[store.templateId];
-  const previewImageUrl = store.branding.heroBannerUrl || fallbackMedia.imageUrl;
+  const templateMeta =
+    INDUSTRY_TEMPLATES[store.templateId] ?? INDUSTRY_TEMPLATES['food-restaurant'];
+  const fallbackMedia =
+    TEMPLATE_SHOWCASE_MEDIA[store.templateId] ?? TEMPLATE_SHOWCASE_MEDIA['food-restaurant'];
+  const previewImageUrl = store.branding?.heroBannerUrl || fallbackMedia.imageUrl;
+  const storeInitial = (store.name ?? '').trim().charAt(0).toUpperCase() || 'S';
   const shopPath = buildRoutePath({ name: 'storefront', storeSlug: store.slug });
 
   const handleCardBodyClick = () => {
@@ -169,9 +172,9 @@ export function StoreCard({ store, onDeleteRequest }: StoreCardProps) {
               ) : (
                 <div
                   className="w-10 h-10 rounded-xl flex items-center justify-center text-white text-sm font-bold shadow-sm border border-white/25 shrink-0"
-                  style={{ backgroundColor: store.branding.primaryColor }}
+                  style={{ backgroundColor: store.branding?.primaryColor || '#0f172a' }}
                 >
-                  {store.name.trim().charAt(0).toUpperCase()}
+                  {storeInitial}
                 </div>
               )}
               <div className="min-w-0">

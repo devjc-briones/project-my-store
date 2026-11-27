@@ -88,11 +88,11 @@ export function AdminStoresTab({
       if (q) {
         const owner = userById.get(s.ownerId);
         const matchesStore =
-          s.name.toLowerCase().includes(q) ||
-          s.slug.toLowerCase().includes(q) ||
-          s.domainUrl.toLowerCase().includes(q);
+          (s.name ?? '').toLowerCase().includes(q) ||
+          (s.slug ?? '').toLowerCase().includes(q) ||
+          (s.domainUrl ?? '').toLowerCase().includes(q);
         const matchesOwner =
-          owner?.name.toLowerCase().includes(q) || owner?.email.toLowerCase().includes(q);
+          (owner?.name ?? '').toLowerCase().includes(q) || (owner?.email ?? '').toLowerCase().includes(q);
         if (!matchesStore && !matchesOwner) return false;
       }
       return true;

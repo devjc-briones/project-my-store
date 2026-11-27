@@ -97,7 +97,11 @@ export function DashboardPage() {
     const q = searchQuery.trim().toLowerCase();
     return stores.filter((store) => {
       if (statusFilter !== 'all' && store.status !== statusFilter) return false;
-      if (q && !store.name.toLowerCase().includes(q) && !store.slug.toLowerCase().includes(q)) {
+      if (
+        q &&
+        !(store.name ?? '').toLowerCase().includes(q) &&
+        !(store.slug ?? '').toLowerCase().includes(q)
+      ) {
         return false;
       }
       return true;

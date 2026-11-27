@@ -103,7 +103,7 @@ export function AdminRevenueTab({
       const pendingTx = transactions.find(
         (t) =>
           t.status === 'pending' &&
-          (t.userId === u.id || t.userEmail.toLowerCase() === u.email.toLowerCase())
+          (t.userId === u.id || (t.userEmail ?? '').toLowerCase() === (u.email ?? '').toLowerCase())
       );
       if (pendingTx) {
         return pendingTx;
@@ -125,10 +125,10 @@ export function AdminRevenueTab({
     const matchesQuery = (tx: SubscriptionTransaction) => {
       if (!q) return true;
       return (
-        tx.userName.toLowerCase().includes(q) ||
-        tx.userEmail.toLowerCase().includes(q) ||
-        tx.referenceId.toLowerCase().includes(q) ||
-        tx.paymentMethod.toLowerCase().includes(q)
+        (tx.userName ?? '').toLowerCase().includes(q) ||
+        (tx.userEmail ?? '').toLowerCase().includes(q) ||
+        (tx.referenceId ?? '').toLowerCase().includes(q) ||
+        (tx.paymentMethod ?? '').toLowerCase().includes(q)
       );
     };
 

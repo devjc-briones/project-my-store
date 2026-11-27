@@ -113,9 +113,9 @@ export function AdminUsersTab({
       if (filter === 'restricted' && u.status !== 'restricted') return false;
       if (
         q &&
-        !u.name.toLowerCase().includes(q) &&
-        !u.email.toLowerCase().includes(q) &&
-        !u.id.toLowerCase().includes(q)
+        !(u.name ?? '').toLowerCase().includes(q) &&
+        !(u.email ?? '').toLowerCase().includes(q) &&
+        !(u.id ?? '').toLowerCase().includes(q)
       ) {
         return false;
       }
@@ -132,8 +132,8 @@ export function AdminUsersTab({
       if (q) {
         const storeName = (b.storeId ? storeById.get(b.storeId)?.name : undefined) ?? b.storeName ?? '';
         const matches =
-          b.name.toLowerCase().includes(q) ||
-          b.email.toLowerCase().includes(q) ||
+          (b.name ?? '').toLowerCase().includes(q) ||
+          (b.email ?? '').toLowerCase().includes(q) ||
           storeName.toLowerCase().includes(q);
         if (!matches) return false;
       }
