@@ -1254,6 +1254,7 @@ export function UpgradePlanPage() {
                                       alt={`${activeChannel.label} Payment QR`}
                                       imgClassName="w-32 h-32 sm:w-36 sm:h-36 object-contain rounded-lg"
                                       wrapperClassName="flex flex-col items-center gap-1.5 shrink-0"
+                                      downloadFileName={`mystore-pro-qr-${paymentSession.referenceCode}.png`}
                                     />
                                   )}
 

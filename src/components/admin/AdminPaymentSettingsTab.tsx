@@ -918,6 +918,7 @@ export function AdminPaymentSettingsTab({
                         alt={`${activePreviewChannel.label} QR Preview`}
                         imgClassName="w-24 h-24 object-contain rounded"
                         wrapperClassName="flex flex-col items-center gap-1.5 shrink-0"
+                        downloadFileName={`preview-qr-${activePreviewChannel.id}.png`}
                       />
                     )}
                     <div className="flex-1 min-w-0 text-center sm:text-left space-y-1.5">

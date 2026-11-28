@@ -1799,6 +1799,11 @@ export function StorefrontCartDrawer({
                         alt={`${qrPaymentDetails.title} QR Code`}
                         imgClassName="w-36 h-36 sm:w-44 sm:h-44 object-contain rounded-lg"
                         wrapperClassName="flex flex-col items-center gap-1.5"
+                        downloadFileName={
+                          orderPaymentSession?.referenceCode
+                            ? `payment-qr-${orderPaymentSession.referenceCode}.png`
+                            : 'payment-qr.png'
+                        }
                       />
                     </div>
                   )}
