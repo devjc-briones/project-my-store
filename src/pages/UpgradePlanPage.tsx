@@ -368,6 +368,8 @@ export function UpgradePlanPage() {
   const handleResumePendingPayment = async () => {
     if (!pendingSubscriptionTx) return;
     const targetPlanId: PlanId = pendingSubscriptionTx.planId || 'pro';
+    const targetPlanPrice =
+      platformPlans.find((p) => p.id === targetPlanId)?.monthlyPrice ?? proMonthlyPrice;
     setSelectedPlanId(targetPlanId);
     setCompletedUpgrade(null);
     setSessionError(null);
@@ -386,26 +388,36 @@ export function UpgradePlanPage() {
 
     setPaymentModalOpen(true);
 
-    // If current state already holds the awaiting session, keep it immediately
+    // If current state already holds an awaiting session matching the current plan price, keep it
     if (
       paymentSession &&
       paymentSession.referenceCode === pendingSubscriptionTx.referenceId &&
-      paymentSession.status === 'awaiting_payment'
+      paymentSession.status === 'awaiting_payment' &&
+      Math.abs(paymentSession.baseAmount - targetPlanPrice) < 0.01
     ) {
       return;
     }
 
     const cached = readCachedSubscriptionSession();
-    if (cached && cached.referenceCode === pendingSubscriptionTx.referenceId) {
+    const isCachedPriceMatching =
+      cached &&
+      cached.referenceCode === pendingSubscriptionTx.referenceId &&
+      cached.status === 'awaiting_payment' &&
+      Math.abs(cached.baseAmount - targetPlanPrice) < 0.01;
+
+    if (isCachedPriceMatching && cached) {
       setPaymentSession(cached);
       const cachedChannel = availableChannels.find((c) => c.id === cached.channel);
       if (cachedChannel) setSelectedChannelId(cachedChannel.id);
+    } else if (cached) {
+      writeCachedSubscriptionSession(null);
+      setPaymentSession(null);
     }
 
     setIsResumingSession(true);
     try {
       let latest: PaymentSessionIntent | null = null;
-      if (cached && cached.referenceCode === pendingSubscriptionTx.referenceId) {
+      if (isCachedPriceMatching && cached) {
         latest = await pollPaymentSessionIntent(cached.id, cached.readToken).catch(() => null);
         if (latest) {
           latest = { ...latest, readToken: cached.readToken };
@@ -414,6 +426,17 @@ export function UpgradePlanPage() {
       if (!latest) {
         latest = await fetchPaymentSessionByReference(pendingSubscriptionTx.referenceId);
       }
+
+      if (
+        latest.status === 'awaiting_payment' &&
+        Math.abs(latest.baseAmount - targetPlanPrice) >= 0.01
+      ) {
+        // Price was updated by Admin after this old pending session was created; start fresh
+        writeCachedSubscriptionSession(null);
+        setPaymentSession(null);
+        return;
+      }
+
       setPaymentSession(latest);
       writeCachedSubscriptionSession(latest);
       const sessionChannel = availableChannels.find((c) => c.id === latest.channel);
@@ -437,7 +460,7 @@ export function UpgradePlanPage() {
         });
       }
     } catch {
-      if (!cached || cached.referenceCode !== pendingSubscriptionTx.referenceId) {
+      if (!isCachedPriceMatching) {
         setPaymentSession(null);
       }
     } finally {
@@ -448,13 +471,18 @@ export function UpgradePlanPage() {
   const handleSelectPlan = (planId: PlanId) => {
     const isPayingDueCurrentPlan = planId === currentPlanId && isPlanDue;
     if (planId === currentPlanId && !isPayingDueCurrentPlan) return;
-    if (pendingSubscriptionTx && planId === pendingSubscriptionTx.planId) {
-      void handleResumePendingPayment();
-      return;
-    }
 
     const targetPlan = platformPlans.find((p) => p.id === planId);
     if (!targetPlan) return;
+
+    if (
+      pendingSubscriptionTx &&
+      planId === pendingSubscriptionTx.planId &&
+      Math.abs(pendingSubscriptionTx.amount - targetPlan.monthlyPrice) < 0.01
+    ) {
+      void handleResumePendingPayment();
+      return;
+    }
 
     if (targetPlan.monthlyPrice === 0) {
       if (isPaidPlan && !isCancellationScheduled) {
@@ -802,11 +830,21 @@ export function UpgradePlanPage() {
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0">
                 <button
                   type="button"
-                  onClick={() => void handleResumePendingPayment()}
+                  onClick={() => {
+                    if (Math.abs(pendingSubscriptionTx.amount - proMonthlyPrice) >= 0.01) {
+                      handleSelectPlan('pro');
+                    } else {
+                      void handleResumePendingPayment();
+                    }
+                  }}
                   className="min-h-[42px] px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl cursor-pointer shrink-0 inline-flex items-center justify-center gap-1.5"
                 >
                   <QrCode className="w-4 h-4" />
-                  <span>Continue Payment</span>
+                  <span>
+                    {Math.abs(pendingSubscriptionTx.amount - proMonthlyPrice) >= 0.01
+                      ? `Pay Updated Price (₱${proMonthlyPrice}/mo)`
+                      : 'Continue Payment'}
+                  </span>
                 </button>
                 <button
                   type="button"

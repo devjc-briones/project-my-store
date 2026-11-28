@@ -475,6 +475,61 @@ export function AdminPaymentSettingsTab({
 
   return (
     <div className="space-y-4">
+      {/* Pro Plan Monthly Price Editor */}
+      <form
+        onSubmit={handleSaveProPrice}
+        className="bg-white border border-[#e2e8f0] rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3.5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]"
+      >
+        <div className="space-y-0.5 min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-sm font-bold text-[#0f172a]">Pro Plan Price (Monthly)</h2>
+            <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-800 border border-slate-200 tabular-nums">
+              Current: {formatPlanPriceLabel(activeProPrice)}/mo
+            </span>
+          </div>
+          <p className="text-xs text-slate-500">
+            Sets the monthly Pro subscription price shown on Landing Page, Upgrade Plan, and Checkout QR.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="relative w-36 sm:w-40">
+            <span
+              aria-hidden="true"
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-mono font-bold text-slate-500 pointer-events-none"
+            >
+              ₱
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={1000000}
+              step="1"
+              inputMode="decimal"
+              aria-label="Pro Plan monthly price in PHP"
+              value={priceInput}
+              onChange={(e) => setPriceInput(e.target.value)}
+              className="w-full min-h-[38px] pl-7 pr-11 py-1.5 text-sm font-mono font-bold text-[#0f172a] bg-slate-50 focus:bg-white border border-[#e2e8f0] rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900 tabular-nums"
+            />
+            <span
+              aria-hidden="true"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-medium text-slate-400 pointer-events-none"
+            >
+              /mo
+            </span>
+          </div>
+
+          <button
+            type="submit"
+            disabled={isSavingPrice}
+            className="inline-flex items-center justify-center gap-1.5 min-h-[38px] px-4 py-2 text-xs font-semibold text-white bg-[#0f172a] hover:bg-slate-800 disabled:opacity-60 rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>{isSavingPrice ? 'Saving...' : 'Save Price'}</span>
+          </button>
+        </div>
+      </form>
+
       {/* Top Action & Summary Bar */}
       <div className="bg-white border border-[#e2e8f0] rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
         <div className="space-y-0.5">
@@ -522,61 +577,6 @@ export function AdminPaymentSettingsTab({
           </button>
         </div>
       </div>
-
-      {/* Pro Plan Monthly Price Editor */}
-      <form
-        onSubmit={handleSaveProPrice}
-        className="bg-white border border-[#e2e8f0] rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3.5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]"
-      >
-        <div className="space-y-0.5 min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-sm font-bold text-[#0f172a]">Pro Plan Price (Monthly)</h2>
-            <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-800 border border-slate-200 tabular-nums">
-              Current: {formatPlanPriceLabel(activeProPrice)}/mo
-            </span>
-          </div>
-          <p className="text-xs text-slate-500">
-            Sets the monthly Pro subscription price shown on Landing Page, Upgrade Plan, and Checkout.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2 shrink-0">
-          <div className="relative w-36 sm:w-40">
-            <span
-              aria-hidden="true"
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-mono font-bold text-slate-500 pointer-events-none"
-            >
-              ₱
-            </span>
-            <input
-              type="number"
-              min={1}
-              max={1000000}
-              step="1"
-              inputMode="decimal"
-              aria-label="Pro Plan monthly price in PHP"
-              value={priceInput}
-              onChange={(e) => setPriceInput(e.target.value)}
-              className="w-full min-h-[38px] pl-7 pr-11 py-1.5 text-sm font-mono font-bold text-[#0f172a] bg-slate-50 focus:bg-white border border-[#e2e8f0] rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900 tabular-nums"
-            />
-            <span
-              aria-hidden="true"
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-medium text-slate-400 pointer-events-none"
-            >
-              /mo
-            </span>
-          </div>
-
-          <button
-            type="submit"
-            disabled={isSavingPrice}
-            className="inline-flex items-center justify-center gap-1.5 min-h-[38px] px-4 py-2 text-xs font-semibold text-white bg-[#0f172a] hover:bg-slate-800 disabled:opacity-60 rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Save className="w-3.5 h-3.5" />
-            <span>{isSavingPrice ? 'Saving...' : 'Save Price'}</span>
-          </button>
-        </div>
-      </form>
 
       {enabledChannels.length === 0 && (
         <div

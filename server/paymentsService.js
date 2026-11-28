@@ -16,6 +16,7 @@ const memoryRecentAlerts = [];
 let runtimeActiveEngine =
   process.env.PAYMENT_ENGINE_DEFAULT === 'paymongo' ? 'paymongo' : 'auto_match';
 let runtimeProPlanPrice = PLAN_PRICES_PHP.pro;
+let hasRuntimeProPriceOverride = false;
 
 function cleanEnvValue(raw) {
   return String(raw || '')
@@ -313,38 +314,61 @@ export async function setActiveGatewayEngine(engine, adminUserId) {
   return runtimeActiveEngine;
 }
 
-export async function getProPlanPricePhp() {
-  const client = getSupabaseAdminClient() || getSupabaseAnonOrScopedClient();
-  if (client) {
+async function getProPlanPricePhpWithMeta(accessToken) {
+  const { url, viteUrl } = getSupabaseServerConfig();
+  const candidates = [
+    getSupabaseAdminClient(),
+    getSupabaseAnonOrScopedClient(accessToken),
+    viteUrl && viteUrl !== url ? getSupabaseAnonOrScopedClient(accessToken, viteUrl) : null,
+  ].filter(Boolean);
+
+  for (const client of candidates) {
     try {
-      const { data } = await client
+      const { data, error } = await client
         .from('platform_payment_channels')
         .select('account_number')
         .eq('id', PRO_PLAN_PRICE_ROW_ID)
         .maybeSingle();
+      if (error) continue;
       const parsed = Number(data?.account_number);
       if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 1_000_000) {
         runtimeProPlanPrice = roundMoney(parsed);
+        hasRuntimeProPriceOverride = true;
+        return { price: runtimeProPlanPrice, resolvedFromSource: true };
       }
     } catch {
-      // Fallback cleanly to runtimeProPlanPrice
+      // Try next client cleanly
     }
   }
-  return runtimeProPlanPrice;
+  return {
+    price: runtimeProPlanPrice,
+    resolvedFromSource: hasRuntimeProPriceOverride,
+  };
 }
 
-export async function setProPlanPricePhp(price) {
+export async function getProPlanPricePhp(accessToken) {
+  const { price } = await getProPlanPricePhpWithMeta(accessToken);
+  return price;
+}
+
+export async function setProPlanPricePhp(price, accessToken) {
   const parsed = Number(price);
   if (!Number.isFinite(parsed) || parsed < 1 || parsed > 1_000_000) {
     throw new Error('Pro plan price must be between ₱1 and ₱1,000,000.');
   }
   const safePrice = roundMoney(parsed);
   runtimeProPlanPrice = safePrice;
+  hasRuntimeProPriceOverride = true;
 
-  const adminClient = getSupabaseAdminClient();
-  if (adminClient) {
+  const { url, viteUrl } = getSupabaseServerConfig();
+  const client =
+    getSupabaseAdminClient() ||
+    getSupabaseAnonOrScopedClient(accessToken) ||
+    (viteUrl && viteUrl !== url ? getSupabaseAnonOrScopedClient(accessToken, viteUrl) : null);
+
+  if (client) {
     try {
-      await adminClient.from('platform_payment_channels').upsert(
+      await client.from('platform_payment_channels').upsert(
         {
           id: PRO_PLAN_PRICE_ROW_ID,
           channel_type: 'custom',
@@ -756,7 +780,21 @@ export async function createPaymentSession(params) {
 
   if (params.targetType === 'subscription') {
     planId = 'pro';
-    authoritativeAmount = await getProPlanPricePhp();
+    const { price: serverProPrice, resolvedFromSource } = await getProPlanPricePhpWithMeta(
+      params.accessToken
+    );
+    const clientBaseAmount = Number(params.baseAmount);
+    if (resolvedFromSource) {
+      authoritativeAmount = serverProPrice;
+    } else if (
+      Number.isFinite(clientBaseAmount) &&
+      clientBaseAmount >= 1 &&
+      clientBaseAmount <= 1_000_000
+    ) {
+      authoritativeAmount = roundMoney(clientBaseAmount);
+    } else {
+      authoritativeAmount = serverProPrice;
+    }
     description = 'mystore Pro Plan (30 Days)';
   } else {
     const rawAmount = Number(params.baseAmount);

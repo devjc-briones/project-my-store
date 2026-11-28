@@ -244,7 +244,7 @@ export function createPaymentsApiApp() {
         return;
       }
 
-      const proPlanPrice = await setProPlanPricePhp(rawPrice);
+      const proPlanPrice = await setProPlanPricePhp(rawPrice, accessToken);
       const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
       const host = req.headers['x-forwarded-host'] || req.headers.host || '';
       const config = await getPublicGatewayConfig(host ? `${proto}://${host}` : '');
